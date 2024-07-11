@@ -83,22 +83,22 @@ if __name__ == "__main__":
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
     crit = nn.MSELoss()
 
-    # for epoch in range(5):
-        # for x, y in train_loader:
-            # optim.zero_grad()
-            # out, _, loss = model(x)
+    for epoch in range(5):
+        for x, y in train_loader:
+            optim.zero_grad()
+            out, _, loss = model(x)
 
-            # reconstruct_loss = crit(out, x)
-            # loss = reconstruct_loss + loss
+            reconstruct_loss = crit(out, x)
+            loss = reconstruct_loss + loss
 
-            # loss.backward()
-            # optim.step()
-            # print(f"e={epoch}: loss={loss.item():.4f}")
+            loss.backward()
+            optim.step()
+            print(f"e={epoch}: loss={loss.item():.4f}")
 
     # # # save model
-    # torch.save(model.state_dict(), "vqgan.pth")
+    torch.save(model.state_dict(), "vqgan.pth")
 
-    # # load model
+    # load model
     model = VQVAE()
     model.load_state_dict(torch.load("vqgan.pth"))
     model.eval()
