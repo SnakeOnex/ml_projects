@@ -8,16 +8,16 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 K = 512
 D = 2
 
-dataset = "mnist" # mnist or cifar
+dataset = "cifar" # mnist or cifar
 
 class Encoder(nn.Module):
     def __init__(self, input_channels, D):
         super(Encoder, self).__init__()
         self.conv_block = nn.Sequential(
-            nn.Conv2d(input_channels, 16, 4, stride=2, padding=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(input_channels, 64, 4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Conv2d(16, D, 4, stride=2, padding=1),
+            nn.Conv2d(64, D, 4, stride=2, padding=1),
             nn.BatchNorm2d(D),
             nn.ReLU(),
         )
@@ -36,30 +36,30 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         x = self.conv_block(x)
-        # x = x + self.res1(x)
-        # x = x + self.res2(x)
+        x = x + self.res1(x)
+        x = x + self.res2(x)
         return x
 
 class Decoder(nn.Module):
     def __init__(self, input_channels, D):
         super(Decoder, self).__init__()
         self.res1 = nn.Sequential(
-            nn.Conv2d(D, D, 3, stride=1, padding=1),
-            nn.BatchNorm2d(D),
+            nn.Conv2d(D, 64, 3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
         )
 
         self.res2 = nn.Sequential(
-            nn.Conv2d(D, D, 3, stride=1, padding=1),
-            nn.BatchNorm2d(D),
+            nn.Conv2d(64, 64, 3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),  
         )
 
         self.convtrans_block = nn.Sequential(
-            nn.ConvTranspose2d(D, 16, 4, stride=2, padding=1),
-            nn.BatchNorm2d(16),
+            nn.ConvTranspose2d(64, 64, 4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.ConvTranspose2d(16, input_channels, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(64, input_channels, 4, stride=2, padding=1),
             nn.Sigmoid(),
         )
 
