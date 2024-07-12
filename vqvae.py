@@ -3,39 +3,39 @@ import torch.nn as nn
 import time
 import PIL
 import argparse
+from tqdm import tqdm
+from pathlib import Path
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-K = 512
-D = 64
 
-dataset = "imagenet" # mnist or cifar
+HID = 256
 
 class Encoder(nn.Module):
     def __init__(self, input_channels, D):
         super(Encoder, self).__init__()
         self.conv_block = nn.Sequential(
-            nn.Conv2d(input_channels, 64, 4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(input_channels, HID, 4, stride=2, padding=1),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),
-            nn.Conv2d(64, 64, 4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(HID, HID, 4, stride=2, padding=1),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),
         )
 
         self.res1 = nn.Sequential(
-            nn.Conv2d(64, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(HID, HID, 3, stride=1, padding=1),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),
         )
 
         self.res2 = nn.Sequential(
-            nn.Conv2d(64, 64, 1, stride=1, padding=0),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(HID, HID, 1, stride=1, padding=0),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),  
         )
 
-        self.proj = nn.Conv2d(64, D, 1, stride=1, padding=0)
+        self.proj = nn.Conv2d(HID, D, 1, stride=1, padding=0)
 
     def forward(self, x):
         x = self.conv_block(x)
@@ -48,25 +48,25 @@ class Decoder(nn.Module):
     def __init__(self, input_channels, D):
         super(Decoder, self).__init__()
         self.res1 = nn.Sequential(
-            nn.Conv2d(64, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(HID, HID, 3, stride=1, padding=1),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),
         )
 
         self.res2 = nn.Sequential(
-            nn.Conv2d(64, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(HID, HID, 3, stride=1, padding=1),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),  
         )
 
         self.convtrans_block = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, 4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            nn.ConvTranspose2d(HID, HID, 4, stride=2, padding=1),
+            nn.BatchNorm2d(HID),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, input_channels, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(HID, input_channels, 4, stride=2, padding=1),
             nn.Sigmoid(),
         )
-        self.proj = nn.Conv2d(D, 64, 1, stride=1, padding=0)
+        self.proj = nn.Conv2d(D, HID, 1, stride=1, padding=0)
 
     def forward(self, x):
         x = self.proj(x)
@@ -102,7 +102,7 @@ class VQVAE(nn.Module):
         # losses
         commitment_loss = torch.mean((quantized.detach() - enc)**2)
         codebook_loss = torch.mean((quantized - enc.detach())**2)
-        quantize_loss = codebook_loss + 0.2 * commitment_loss
+        quantize_loss = codebook_loss + 0.255555 * commitment_loss
 
         # quant_out trick to get gradients to the encoder
         quant_out = enc + (quantized - enc).detach()
@@ -156,55 +156,76 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="mnist")
     args = parser.parse_args()
 
-    # dataset = args.dataset
+    dataset = args.dataset
 
     print(f"training VQ-VAE on the {dataset} dataset")
 
     transform = torchvision.transforms.Compose([
-        torchvision.transforms.Resize(256),
-        torchvision.transforms.CenterCrop(224),
+        # torchvision.transforms.Resize(256),
+        # torchvision.transforms.CenterCrop(224),
         torchvision.transforms.ToTensor(),
-        # torchvision.transforms.Resize((32, 32)),
     ])
 
     if dataset == "mnist":
+        transform = torchvision.transforms.Compose([
+            torchvision.transforms.ToTensor(),
+        ])
+
         train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
         test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-        K, D = 32, 2
+        K, D = 32, 64
     elif dataset == "cifar":
         train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
         test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
-        K, D = 64, 4
+        K, D = 512, 64
     elif dataset == "imagenet":
+        transform = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(128),
+            torchvision.transforms.CenterCrop(128),
+            torchvision.transforms.ToTensor(),
+            # torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
         train_dataset = torchvision.datasets.ImageNet(
                 root='/datagrid/public_datasets/imagenet/imagenet_pytorch',
                 split='train',
                 transform=transform
         )
 
-        train_dataset = torch.utils.data.Subset(train_dataset, range(16384))
+        train_dataset = torch.utils.data.Subset(train_dataset, range(10_000))
 
         test_dataset = torchvision.datasets.ImageNet(
                 root='/datagrid/public_datasets/imagenet/imagenet_pytorch',
                 split='val',
                 transform=transform
         )
+        test_dataset = torch.utils.data.Subset(test_dataset, range(1_000))
         K, D = 512, 64
     print(f"Dataset size: train_len={len(train_dataset)}, test_len={len(test_dataset)}")
     print(f"K={K}, D={D}")
 
-    idxs = torch.randint(0, len(dataset), (16,))
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=8)
+    Path("results").mkdir(parents=True, exist_ok=True)
+
+    idxs = torch.randint(0, len(test_dataset), (16,))
+    train_loader = torch.utils.data.DataLoader(
+            train_dataset, 
+            batch_size=128, 
+            shuffle=True, 
+            num_workers=32, 
+            prefetch_factor=16, 
+            pin_memory=True,
+            persistent_workers=True
+            )
     model = VQVAE().to(device)
     optim = torch.optim.Adam(model.parameters(), lr=5e-4)
     crit = nn.MSELoss()
 
-    for epoch in range(40):
+    for epoch in range(100):
         r_loss = 0
         q_loss = 0
         count = 0
         st = time.time()
-        for x, _ in train_loader:
+        for x, _ in tqdm(train_loader):
             x = x.to(device)
             optim.zero_grad()
             out, _, loss = model(x)
@@ -213,7 +234,7 @@ if __name__ == "__main__":
             r_loss += reconstruct_loss
             q_loss += loss
             count += 1
-            loss = reconstruct_loss + loss
+            loss = 2 * reconstruct_loss + loss
 
             loss.backward()
             optim.step()
@@ -223,33 +244,18 @@ if __name__ == "__main__":
         print(f"e={epoch:2}, trn_r_l={r_loss:.4f}, val_r_l={val_r_loss:.4f}, trn_q_l={q_loss:.4f}, val_q_l={val_q_loss:.4f}, t={(time.time() - st):.2f} s")
 
         if epoch % 1 == 0:
-            plot_results(model, test_dataset, 16, path=f"vqvae_{epoch}.png", idxs=idxs)
+            plot_results(model, test_dataset, 16, path=f"results/vqvae_{epoch}.png", idxs=idxs)
 
-    # # save model
+    # save model
     torch.save(model.state_dict(), "vqvae.pth")
 
-    # load model
     model.load_state_dict(torch.load("vqvae.pth"))
-    model.eval()
 
-    # test_dataset = train_dataset
-    idxs = torch.randint(0, len(test_dataset), (16,))
-    images_gt = torch.stack([test_dataset[i][0] for i in idxs])
-
-    images_pred, quantized, _ = model(images_gt.to(device))
-    images_pred = images_pred.cpu().detach()
-
-    grid_pred = torchvision.utils.make_grid(images_pred, nrow=4)
-    grid = torchvision.utils.make_grid(images_gt, nrow=4)
-    grid_final = torch.cat([grid, grid_pred], dim=2)
-
-    grid_final = grid_final.permute(1, 2, 0)
+    plot_results(model, test_dataset, 16, path=f"random_sample.png")
 
 
-    grid_final = grid_final.numpy()
-    grid_final = (grid_final * 255).astype("uint8")
-    grid_final = PIL.Image.fromarray(grid_final)
 
-    # save
-    grid_final.save("vqvae.png")
+
+
+
 
