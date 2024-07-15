@@ -7,21 +7,6 @@ from gpt import GPTLanguageModel
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def eval_vqvae(model, loader):
-    with torch.no_grad():
-        r_loss = 0
-        q_loss = 0
-        count = 0
-        for x, _ in loader:
-            x = x.to(device)
-            out  = model(x)
-
-            reconstruct_loss = crit(out["output"], x)
-            r_loss += reconstruct_loss
-            q_loss += out["quantize_loss"]
-            count += 1
-    return r_loss/count, q_loss/count
-
 def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
     if idxs is None:
         idxs = torch.randint(0, len(dataset), (16,))
@@ -93,9 +78,6 @@ if __name__ == "__main__":
         quantized = model(x)["closest"]
         tokens = torch.cat([tokens, quantized], dim=0)
 
-    # tokens = quantized.view(-1)
-    # exit(0)
-
     gpt = GPTLanguageModel().to(device)
     gpt.train()
 
@@ -105,10 +87,7 @@ if __name__ == "__main__":
 
     def get_batch(data):
         # generate a small batch of data of inputs x and targets y
-        # data = train_data if split == 'train' else val_data
-        # ix = torch.randint(len(data) - block_size, (batch_size,))
         ix = torch.randint(tokens.shape[0], (batch_size,))
-        # data = tokens[ix]
         x = torch.stack([data[i,0:block_size] for i in ix])
         y = torch.stack([data[i,1:block_size+1] for i in ix])
         x, y = x.to(device), y.to(device)
@@ -147,22 +126,11 @@ if __name__ == "__main__":
         context = torch.zeros((1, 1), dtype=torch.long, device=device)
         context[0, 0] = tokens[i,0]
         res = gpt.generate(context, 48)
-        print(res)
-
 
         img = model.decode(res)
-        print(img.shape)
         images = torch.cat([images, img], dim=0)
 
-        # import matplotlib.pyplot as plt
-        # plt.imshow(img[0].cpu().detach().numpy().squeeze(), cmap="gray")
-        # plt.savefig(f"gens/mnist_{i}.png")
-        # print("saved")
-
-
     grid_pred = torchvision.utils.make_grid(images, nrow=4)
-    # grid = torchvision.utils.make_grid(images_gt, nrow=4)
-    # grid_final = torch.cat([grid, grid_pred], dim=2)
 
     grid_final = grid_pred.permute(1, 2, 0)
 
