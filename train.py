@@ -13,13 +13,12 @@ def eval_vqvae(model, loader):
         count = 0
         for x, _ in loader:
             x = x.to(device)
-            out, _, loss = model(x)
+            out  = model(x)
 
-            reconstruct_loss = crit(out, x)
+            reconstruct_loss = crit(out["output"], x)
             r_loss += reconstruct_loss
-            q_loss += loss
+            q_loss += out["quantize_loss"]
             count += 1
-            loss = reconstruct_loss + loss
     return r_loss/count, q_loss/count
 
 def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
@@ -29,7 +28,7 @@ def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
     images_gt = torch.stack([dataset[i][0] for i in idxs])
 
     with torch.inference_mode():
-        images_pred, quantized, _ = model(images_gt.to(device))
+        images_pred = model(images_gt.to(device))["output"]
     images_pred = images_pred.cpu().detach()
 
     grid_pred = torchvision.utils.make_grid(images_pred, nrow=4)
@@ -87,6 +86,8 @@ if __name__ == "__main__":
     optim = torch.optim.Adam(model.parameters(), lr=5e-4)
     crit = nn.MSELoss()
 
+    with torch.no_grad(): model(torch.randn(1, 1, 28, 28).to(device), verbose=True)
+
     best_loss = float("inf")
     best_model = None
 
@@ -98,13 +99,13 @@ if __name__ == "__main__":
         for x, _ in tqdm.tqdm(train_loader):
             x = x.to(device)
             optim.zero_grad()
-            out, _, loss = model(x)
+            out = model(x)
 
-            reconstruct_loss = crit(out, x)
+            reconstruct_loss = crit(out["output"], x)
             r_loss += reconstruct_loss
-            q_loss += loss
+            q_loss += out["quantize_loss"]
             count += 1
-            loss = 2 * reconstruct_loss + loss
+            loss = 2 * reconstruct_loss + out["quantize_loss"]
 
             loss.backward()
             optim.step()
