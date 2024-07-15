@@ -74,8 +74,18 @@ class VQVAE(nn.Module):
         self.embedding = nn.Embedding(num_embeddings=self.K, embedding_dim=self.D)
         self.decoder = Decoder(config["channels"], self.D)
 
-    def forward(self, x):
+    def decode(self, z):
+        print(z.shape)
+        quantized = self.embedding(z)
+        print(quantized.shape)
+        quantized = quantized.view(1, 8, 7, 7)
+        return self.decoder(quantized)
+
+    def forward(self, x, verbose=False):
         enc = self.encoder(x)
+
+        if verbose: print("Input shape:", x.shape) 
+        if verbose: print("Encoder output shape:", enc.shape) 
 
         B, C, H, W = enc.shape
         quant_input = enc.view(B, -1, C) # reshape to be B x -1 x C
@@ -84,15 +94,18 @@ class VQVAE(nn.Module):
         closest = torch.argmin(dists, dim=-1)
         quantized = self.embedding(closest)
 
+        if verbose: print("Quantized shape:", closest.shape) 
+        if verbose: print("Quantized shape:", closest.view(-1)) 
+
         enc = enc.view(B, -1, self.D)
         # losses
         commitment_loss = torch.mean((quantized.detach() - enc)**2)
         codebook_loss = torch.mean((quantized - enc.detach())**2)
-        quantize_loss = codebook_loss + 0.255555 * commitment_loss
+        quantize_loss = codebook_loss + 0.25 * commitment_loss
 
         # quant_out trick to get gradients to the encoder
         quant_out = enc + (quantized - enc).detach()
         quant_out = quant_out.view(B, C, H, W)
         output = self.decoder(quant_out)
 
-        return output, closest, quantize_loss
+        return {"output": output, "closest": closest, "quantize_loss": quantize_loss}
