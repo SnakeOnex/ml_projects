@@ -28,7 +28,7 @@ imagenet_trans = transforms.Compose([
     transforms.Resize(128),
     transforms.CenterCrop(128),
     transforms.ToTensor(),
-]),
+])
 path_to_imagenet='/datagrid/public_datasets/imagenet/imagenet_pytorch'
 train_sz, test_sz = 10_000, 1_000
 imagenet_config = {
@@ -36,7 +36,7 @@ imagenet_config = {
     'D': 64,
     'channels': 3,
     'fetch_train': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='train', transform=imagenet_trans), range(train_sz)),
-    'fetch_test': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans), range(test_sz))
+    'fetch_test': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans), range(test_sz)),
 }
 
 model_configs = {
