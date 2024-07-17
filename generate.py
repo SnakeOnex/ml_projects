@@ -6,6 +6,7 @@ from model_configs import model_configs
 from gpt import GPTLanguageModel
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 
 def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
     if idxs is None:
@@ -33,9 +34,15 @@ def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
+    parser.add_argument("--train", action="store_true")
     args = parser.parse_args()
 
     config = model_configs[args.dataset]
+    C, SZ= config["channels"], config["image_sz"]
+    IMAGE_TOKENS = (SZ//4)**2
+    block_size = IMAGE_TOKENS-1
+    batch_size = 64
+    print(f"dataset={args.dataset}, {C=}, {SZ=}, {IMAGE_TOKENS=}, {block_size=}, {batch_size=}")
 
     print(f"training VQ-VAE on the {args.dataset} dataset")
 
@@ -60,7 +67,7 @@ if __name__ == "__main__":
     )
     test_loader = DataLoader(
             test_dataset, 
-            batch_size=128, 
+            batch_size=16, 
             shuffle=False, 
             num_workers=16, 
             prefetch_factor=4, 
@@ -72,18 +79,20 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth"))
     print("loaded model")
 
-    tokens = torch.zeros((0,49), dtype=torch.long, device=device)
-    for x, _ in test_loader:
+    tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
+    for x, _ in tqdm.tqdm(test_loader):
         x = x.to(device)
         quantized = model(x)["closest"]
         tokens = torch.cat([tokens, quantized], dim=0)
 
-    gpt = GPTLanguageModel().to(device)
+    print("tokens shape: ", tokens.shape)
+    print("tokens_count: ", tokens.view(-1).shape[0])
+
+    gpt = GPTLanguageModel(block_size).to(device)
     gpt.train()
 
     optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
-    block_size = 48
-    batch_size = 64
+
 
     def get_batch(data):
         # generate a small batch of data of inputs x and targets y
@@ -93,8 +102,7 @@ if __name__ == "__main__":
         x, y = x.to(device), y.to(device)
         return x, y
 
-    train = False
-    if train:
+    if args.train:
         max_iters = 4000
         for iter in range(max_iters):
 
@@ -114,18 +122,20 @@ if __name__ == "__main__":
             if iter % 100 == 0 or iter == max_iters - 1:
                 print(f"{iter}: loss={loss.item():.4f}")
 
-        torch.save(gpt.state_dict(), f"{args.dataset}_gpt.pth")
+        torch.save(gpt.state_dict(), f"checkpoints/{args.dataset}_gpt.pth")
     else:
-        gpt.load_state_dict(torch.load(f"{args.dataset}_gpt.pth"))
+        gpt.load_state_dict(torch.load(f"checkpoints/{args.dataset}_gpt.pth"))
         gpt.eval()
 
     Path("gens").mkdir(exist_ok=True)
 
-    images = torch.zeros((0,1,28,28)).to(device)
+    # images = torch.zeros((0,1,28,28)).to(device)
+    images = torch.zeros((0,C,SZ,SZ)).to(device)
     for i in range(16):
         context = torch.zeros((1, 1), dtype=torch.long, device=device)
         context[0, 0] = tokens[i,0]
-        res = gpt.generate(context, 48)
+
+        res = gpt.generate(context, IMAGE_TOKENS-1)
 
         img = model.decode(res)
         images = torch.cat([images, img], dim=0)
@@ -139,7 +149,7 @@ if __name__ == "__main__":
     grid_final = (grid_final * 255).astype("uint8")
     grid_final = PIL.Image.fromarray(grid_final)
 
-    grid_final.save(f"end.png")
+    grid_final.save(f"gens/{args.dataset}_generated.png")
 
 
 

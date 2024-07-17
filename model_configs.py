@@ -9,6 +9,7 @@ mnist_config = {
     'K': 32,
     'D': 8,
     'channels': 1,
+    'image_sz': 28,
     'fetch_train': lambda: datasets.MNIST(root='./data', train=True, download=True, transform=mnist_trans),
     'fetch_test': lambda: datasets.MNIST(root='./data', train=False, download=True, transform=mnist_trans),
 }
@@ -20,6 +21,7 @@ cifar10_config = {
     'K': 512,
     'D': 64,
     'channels': 3,
+    'image_sz': 32,
     'fetch_train': lambda: datasets.CIFAR10(root='./data', train=True, download=True, transform=cifar10_trans),
     'fetch_test': lambda: datasets.CIFAR10(root='./data', train=False, download=True, transform=cifar10_trans),
 }
@@ -35,6 +37,7 @@ imagenet_config = {
     'K': 512,
     'D': 64,
     'channels': 3,
+    'image_sz': 128,
     'fetch_train': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='train', transform=imagenet_trans), range(train_sz)),
     'fetch_test': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans), range(test_sz)),
 }

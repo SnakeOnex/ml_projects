@@ -69,16 +69,14 @@ class Decoder(nn.Module):
 class VQVAE(nn.Module):
     def __init__(self, config):
         super(VQVAE, self).__init__()
-        self.K, self.D = config["K"], config["D"]
+        self.K, self.D, self.image_sz = config["K"], config["D"], config["image_sz"]
         self.encoder = Encoder(config["channels"], self.D)
         self.embedding = nn.Embedding(num_embeddings=self.K, embedding_dim=self.D)
         self.decoder = Decoder(config["channels"], self.D)
 
     def decode(self, z):
-        print(z.shape)
         quantized = self.embedding(z)
-        print(quantized.shape)
-        quantized = quantized.view(1, 8, 7, 7)
+        quantized = quantized.view(1, self.D, self.image_sz//4, self.image_sz//4)
         return self.decoder(quantized)
 
     def forward(self, x, verbose=False):

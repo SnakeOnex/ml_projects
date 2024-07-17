@@ -4,11 +4,11 @@ from torch.nn import functional as F
 
 # hyperparameters
 batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 64 # what is the maximum context length for predictions?
+block_size = 1024 # what is the maximum context length for predictions?
 max_iters = 5000
 eval_interval = 500
 learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 384
 n_head = 6
@@ -24,7 +24,7 @@ torch.manual_seed(1337)
 
 # # here are all the unique characters that occur in this text
 # chars = sorted(list(set(text)))
-vocab_size = 32
+vocab_size = 512
 # # create a mapping from characters to integers
 # stoi = { ch:i for i,ch in enumerate(chars) }
 # itos = { i:ch for i,ch in enumerate(chars) }
@@ -137,11 +137,13 @@ class Block(nn.Module):
 
 class GPTLanguageModel(nn.Module):
 
-    def __init__(self):
+    def __init__(self, block_size):
         super().__init__()
+        self.block_size = block_size
+
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.position_embedding_table = nn.Embedding(self.block_size, n_embd)
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -162,7 +164,9 @@ class GPTLanguageModel(nn.Module):
 
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        # pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+
+        pos_emb = self.position_embedding_table(torch.arange(T, device=self.position_embedding_table.weight.device))
         x = tok_emb + pos_emb # (B,T,C)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
@@ -182,7 +186,7 @@ class GPTLanguageModel(nn.Module):
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
-            idx_cond = idx[:, -block_size:]
+            idx_cond = idx[:, -self.block_size:]
             # get the predictions
             logits, loss = self(idx_cond)
             # focus only on the last time step
