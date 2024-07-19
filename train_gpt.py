@@ -38,11 +38,14 @@ def generate_sample(path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
+    parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
+
 
     run_name = f"gpt-{args.dataset}-{time.time():.0f}"
     run_folder = Path("runs") / run_name
     run_folder.mkdir(exist_ok=True, parents=True)
+
 
     config = model_configs[args.dataset]
     C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
@@ -55,23 +58,43 @@ if __name__ == "__main__":
     print(f"dataset={args.dataset}, {C=}, {SZ=}, {IMAGE_TOKENS=}, {block_size=}, {batch_size=}\
             {eval_iters=}, {max_iters=}, {K=} {D=}")
 
+    gpt_config = {
+        "block_size": block_size,
+        "vocab_size": K,
+        "n_embd": 1024,
+        "n_head": 8,
+        "n_layer": 6,
+    }
+
+    wandb.init(project="gpt-vqvae",
+               name=run_name,
+               config={"dataset": args.dataset, 
+                       "batch_size": batch_size, 
+                       "max_iters": max_iters,
+                       "lr": args.lr,
+                       "K": K,
+                       "SZ": SZ,
+                       "C": C,
+                       "gpt_config": gpt_config,
+                       })
+
     train_dataset, test_dataset = config["fetch_train"](), config["fetch_test"]()
     print(f"train_sz={len(train_dataset)}, test_sz={len(test_dataset)}")
 
     train_loader = DataLoader(
             train_dataset, 
-            batch_size=256, 
+            batch_size=128, 
             shuffle=True, 
-            num_workers=16, 
+            num_workers=8, 
             prefetch_factor=4, 
             pin_memory=True,
             persistent_workers=False
     )
     test_loader = DataLoader(
             test_dataset, 
-            batch_size=256, 
+            batch_size=128, 
             shuffle=False, 
-            num_workers=16, 
+            num_workers=8, 
             prefetch_factor=4, 
             pin_memory=True,
             persistent_workers=False
@@ -97,31 +120,13 @@ if __name__ == "__main__":
     print("tokens shape: ", tokens.shape)
     print("tokens_count: ", tokens.view(-1).shape[0])
 
-    gpt_config = {
-        "block_size": block_size,
-        "vocab_size": K,
-        "n_embd": 768,
-        "n_head": 6,
-        "n_layer": 4,
-    }
 
     gpt = GPTLanguageModel(**gpt_config).to(device)
+    wandb.watch(gpt)
     gpt.train()
 
-    wandb.init(project="gpt-vqvae",
-               name=run_name,
-               config={"dataset": args.dataset, 
-                       "block_size": block_size, 
-                       "batch_size": batch_size, 
-                       "max_iters": max_iters,
-                       "K": K,
-                       "SZ": SZ,
-                       "C": C,
-                       "tokens_shape": tokens.shape,
-                       "total_token_count": tokens.view(-1).shape[0]})
-    wandb.watch(gpt)
 
-    optim = torch.optim.AdamW(gpt.parameters(), lr=1e-3)
+    optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
 
     split = int(0.8 * len(tokens))
     train_tokens, val_tokens = tokens[:split], tokens[split:]

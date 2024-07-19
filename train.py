@@ -5,7 +5,8 @@ from vqvae import VQVAE
 from model_configs import model_configs
 import matplotlib.pyplot as plt
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device(get_free_gpu())
+print("selected device: ", device)
 
 def eval_vqvae(model, loader):
     with torch.no_grad():
@@ -39,10 +40,6 @@ def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
     with torch.inference_mode():
         images_pred = model(images_gt.to(device))["output"]
     images_pred = images_pred.cpu().detach()
-
-    print(images_gt.min(), images_gt.max())
-    print(images_pred.min(), images_pred.max())
-    # exit()
 
     # denormalize imagenet images
     mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
