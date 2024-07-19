@@ -51,7 +51,7 @@ if __name__ == "__main__":
     C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
     IMAGE_TOKENS = (SZ//4)**2
     block_size = IMAGE_TOKENS-1
-    batch_size = 128
+    batch_size = 512
     eval_iters = 50
     eval_interval = 100
     max_iters = 500000
@@ -61,8 +61,8 @@ if __name__ == "__main__":
     gpt_config = {
         "block_size": block_size,
         "vocab_size": K,
-        "n_embd": 1024,
-        "n_head": 8,
+        "n_embd": 768,
+        "n_head": 6,
         "n_layer": 6,
     }
 

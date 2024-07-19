@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from vqvae import VQVAE
 from model_configs import model_configs
 import matplotlib.pyplot as plt
+from utils import get_free_gpu
 
 device = torch.device(get_free_gpu())
 print("selected device: ", device)
@@ -86,7 +87,7 @@ if __name__ == "__main__":
             train_dataset, 
             batch_size=128, 
             shuffle=True, 
-            num_workers=32, 
+            num_workers=16, 
             prefetch_factor=4, 
             pin_memory=True,
             persistent_workers=False
@@ -95,7 +96,7 @@ if __name__ == "__main__":
             test_dataset, 
             batch_size=128, 
             shuffle=False, 
-            num_workers=32, 
+            num_workers=16, 
             prefetch_factor=4, 
             pin_memory=True,
             persistent_workers=False
@@ -126,7 +127,7 @@ if __name__ == "__main__":
     best_loss = float("inf")
     best_model = None
 
-    for epoch in range(40):
+    for epoch in range(100):
         r_loss = 0
         q_loss = 0
         count = 0
