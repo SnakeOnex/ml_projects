@@ -55,7 +55,6 @@ class Decoder(nn.Module):
             nn.BatchNorm2d(HID),
             nn.ReLU(),
             nn.ConvTranspose2d(HID, input_channels, 4, stride=2, padding=1),
-            nn.Sigmoid(),
         )
         self.proj = nn.Conv2d(D, HID, 1, stride=1, padding=0)
 

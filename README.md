@@ -6,7 +6,8 @@ VQ-VAE reimplementation (encoding, decoding, sampling)
     - [X] mnist
     - [X] cifar10
     - [X] imagenet
-- [ ] sampling model (GPT-2):
-    - [ ] data preprocessing
-    - [ ] inference
-    - [ ] training
+- [O] sampling model (GPT-2):
+    - [X] data preprocessing
+    - [X] inference
+    - [X] training
+    - [ ] train / val split & loss

@@ -27,17 +27,18 @@ cifar10_config = {
 }
 
 imagenet_trans = transforms.Compose([
-    transforms.Resize(128),
-    transforms.CenterCrop(128),
+    transforms.Resize(64),
+    transforms.CenterCrop(48),
     transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 path_to_imagenet='/datagrid/public_datasets/imagenet/imagenet_pytorch'
-train_sz, test_sz = 10_000, 1_000
+train_sz, test_sz = 40_000, 2_000
 imagenet_config = {
     'K': 512,
     'D': 64,
     'channels': 3,
-    'image_sz': 128,
+    'image_sz': 48,
     'fetch_train': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='train', transform=imagenet_trans), range(train_sz)),
     'fetch_test': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans), range(test_sz)),
 }

@@ -3,6 +3,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from vqvae import VQVAE
 from model_configs import model_configs
+import matplotlib.pyplot as plt
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -21,6 +22,14 @@ def eval_vqvae(model, loader):
             count += 1
     return r_loss/count, q_loss/count
 
+def denormalize(x):
+    mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
+    x = x * std + mean
+    x = torch.clamp(x, 0, 1) * 255
+    return x
+
+
 def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
     if idxs is None:
         idxs = torch.randint(0, len(dataset), (16,))
@@ -31,12 +40,23 @@ def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
         images_pred = model(images_gt.to(device))["output"]
     images_pred = images_pred.cpu().detach()
 
+    print(images_gt.min(), images_gt.max())
+    print(images_pred.min(), images_pred.max())
+    # exit()
+
+    # denormalize imagenet images
+    mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
+    images_gt = images_gt * std + mean
+    images_pred = images_pred * std + mean
+    images_gt = torch.clamp(images_gt, 0, 1)
+    images_pred = torch.clamp(images_pred, 0, 1)
+
     grid_pred = torchvision.utils.make_grid(images_pred, nrow=4)
     grid = torchvision.utils.make_grid(images_gt, nrow=4)
     grid_final = torch.cat([grid, grid_pred], dim=2)
 
     grid_final = grid_final.permute(1, 2, 0)
-
 
     grid_final = grid_final.numpy()
     grid_final = (grid_final * 255).astype("uint8")
@@ -50,6 +70,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = model_configs[args.dataset]
+    C, SZ= config["channels"], config["image_sz"]
 
     print(f"training VQ-VAE on the {args.dataset} dataset")
 
@@ -57,6 +78,7 @@ if __name__ == "__main__":
 
     print(f"train_sz={len(train_dataset)}, test_sz={len(test_dataset)}")
     print(f"K={config['K']}, D={config['D']}")
+
 
     idxs = torch.randint(0, len(test_dataset), (16,))
 
@@ -67,7 +89,7 @@ if __name__ == "__main__":
             train_dataset, 
             batch_size=128, 
             shuffle=True, 
-            num_workers=16, 
+            num_workers=32, 
             prefetch_factor=4, 
             pin_memory=True,
             persistent_workers=False
@@ -76,17 +98,33 @@ if __name__ == "__main__":
             test_dataset, 
             batch_size=128, 
             shuffle=False, 
-            num_workers=16, 
+            num_workers=32, 
             prefetch_factor=4, 
             pin_memory=True,
             persistent_workers=False
     )
 
+    # for x, _ in train_loader:
+        # x = x.to(device)
+        # print(x[:,0].min(), x[:,0].max())
+        # print(x[:,1].min(), x[:,1].max())
+        # print(x[:,2].min(), x[:,2].max())
+
+        # image = denormalize(x[0].cpu().detach()).squeeze()
+        # print(image.shape)
+        # plt.imshow(image.permute(1, 2, 0).numpy().astype("uint8"))
+        # plt.savefig("test.png")
+
+
+        # break
+    # exit()
+
+
     model = VQVAE(config).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=5e-4)
     crit = nn.MSELoss()
 
-    with torch.no_grad(): model(torch.randn(1, 1, 28, 28).to(device), verbose=True)
+    with torch.no_grad(): model(torch.randn(1, C, SZ, SZ).to(device), verbose=True)
 
     best_loss = float("inf")
     best_model = None
@@ -105,7 +143,7 @@ if __name__ == "__main__":
             r_loss += reconstruct_loss
             q_loss += out["quantize_loss"]
             count += 1
-            loss = 2 * reconstruct_loss + out["quantize_loss"]
+            loss = reconstruct_loss + out["quantize_loss"]
 
             loss.backward()
             optim.step()
