@@ -1,6 +1,6 @@
 #!/bin/bash
 
-learning_rates=(3e-4 6e-4 1e-3)
+learning_rates=(3e-4 6e-4 1e-3 2e-3)
 dataset="cifar10"
 gpu_offset=0
 

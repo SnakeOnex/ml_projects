@@ -147,7 +147,7 @@ if __name__ == "__main__":
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
                 X, Y = get_batch(train_tokens if split == 'train' else val_tokens)
-                logits, loss = gpt(X, Y)
+                _, loss = gpt(X, Y)
                 losses[k] = loss.item()
             out[split] = losses.mean()
         model.train()
@@ -164,10 +164,8 @@ if __name__ == "__main__":
             print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
             generate_sample(run_folder / f"{args.dataset}_generated_{iter}.png")
             wandb.log({"train_loss": losses["train"], "val_loss": losses["val"]})
-            torch.save({"model": model.state_dict(), "optim": optim.state_dict(), "step": iter},
-                       run_folder / f"checkpoint_{iter}.pth")
+            wandb.save(run_folder / f"{args.dataset}_generated_{iter}.png")
 
-            if iter % 500 == 0: wandb.save(run_folder / f"{args.dataset}_generated_{iter}.png")
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
                 torch.save({"model": model.state_dict(), "optim": optim.state_dict(), "step": iter},

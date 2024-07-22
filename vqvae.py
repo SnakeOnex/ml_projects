@@ -1,6 +1,7 @@
 import torch, torch.nn as nn
 
-HID = 256
+HID = 128
+RES_HID = 32
 
 class Encoder(nn.Module):
     def __init__(self, input_channels, D):
@@ -9,24 +10,24 @@ class Encoder(nn.Module):
             nn.Conv2d(input_channels, HID, 4, stride=2, padding=1),
             nn.BatchNorm2d(HID),
             nn.ReLU(),
-            nn.Conv2d(HID, HID, 4, stride=2, padding=1),
-            nn.BatchNorm2d(HID),
+            nn.Conv2d(HID, RES_HID, 4, stride=2, padding=1),
+            nn.BatchNorm2d(RES_HID),
             nn.ReLU(),
         )
 
         self.res1 = nn.Sequential(
-            nn.Conv2d(HID, HID, 3, stride=1, padding=1),
-            nn.BatchNorm2d(HID),
+            nn.Conv2d(RES_HID, RES_HID, 3, stride=1, padding=1),
+            nn.BatchNorm2d(RES_HID),
             nn.ReLU(),
         )
 
         self.res2 = nn.Sequential(
-            nn.Conv2d(HID, HID, 1, stride=1, padding=0),
-            nn.BatchNorm2d(HID),
+            nn.Conv2d(RES_HID, RES_HID, 1, stride=1, padding=0),
+            nn.BatchNorm2d(RES_HID),
             nn.ReLU(),  
         )
 
-        self.proj = nn.Conv2d(HID, D, 1, stride=1, padding=0)
+        self.proj = nn.Conv2d(RES_HID, D, 1, stride=1, padding=0)
 
     def forward(self, x):
         x = self.conv_block(x)
@@ -39,24 +40,24 @@ class Decoder(nn.Module):
     def __init__(self, input_channels, D):
         super(Decoder, self).__init__()
         self.res1 = nn.Sequential(
-            nn.Conv2d(HID, HID, 3, stride=1, padding=1),
-            nn.BatchNorm2d(HID),
+            nn.Conv2d(RES_HID, RES_HID, 3, stride=1, padding=1),
+            nn.BatchNorm2d(RES_HID),
             nn.ReLU(),
         )
 
         self.res2 = nn.Sequential(
-            nn.Conv2d(HID, HID, 3, stride=1, padding=1),
-            nn.BatchNorm2d(HID),
+            nn.Conv2d(RES_HID, RES_HID, 3, stride=1, padding=1),
+            nn.BatchNorm2d(RES_HID),
             nn.ReLU(),  
         )
 
         self.convtrans_block = nn.Sequential(
-            nn.ConvTranspose2d(HID, HID, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(RES_HID, HID, 4, stride=2, padding=1),
             nn.BatchNorm2d(HID),
             nn.ReLU(),
             nn.ConvTranspose2d(HID, input_channels, 4, stride=2, padding=1),
         )
-        self.proj = nn.Conv2d(D, HID, 1, stride=1, padding=0)
+        self.proj = nn.Conv2d(D, RES_HID, 1, stride=1, padding=0)
 
     def forward(self, x):
         x = self.proj(x)

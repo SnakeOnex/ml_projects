@@ -1,4 +1,4 @@
-import subprocess, numpy as np
+import subprocess, torch, numpy as np
 
 def get_free_gpu():
     command = "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits"
