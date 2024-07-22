@@ -7,3 +7,8 @@ def get_free_gpu():
     print(f"Selected GPU: {min_mem_gpu}")
     assert mem_per_gpu[min_mem_gpu] < 100, "No GPU has free memory"
     return f"cuda:{min_mem_gpu}"
+
+def denormalize(x, stats):
+    mean = torch.tensor(stats[0]).reshape(1, x.shape[1], 1, 1)
+    std = torch.tensor(stats[1]).reshape(1, x.shape[1], 1, 1)
+    return torch.clamp(x * std + mean, 0, 1)

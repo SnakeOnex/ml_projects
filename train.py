@@ -4,16 +4,14 @@ from torch.utils.data import DataLoader
 from vqvae import VQVAE
 from model_configs import model_configs
 import matplotlib.pyplot as plt
-from utils import get_free_gpu
+from utils import get_free_gpu, denormalize
 
 device = torch.device(get_free_gpu())
 print("selected device: ", device)
 
 def eval_vqvae(model, loader):
     with torch.no_grad():
-        r_loss = 0
-        q_loss = 0
-        count = 0
+        r_loss, q_loss, count = 0, 0, 0
         for x, _ in loader:
             x = x.to(device)
             out  = model(x)
@@ -24,15 +22,7 @@ def eval_vqvae(model, loader):
             count += 1
     return r_loss/count, q_loss/count
 
-def denormalize(x):
-    mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
-    x = x * std + mean
-    x = torch.clamp(x, 0, 1) * 255
-    return x
-
-
-def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
+def plot_results(model, dataset, stats, path="vqvae.png", idxs=None):
     if idxs is None:
         idxs = torch.randint(0, len(dataset), (16,))
 
@@ -42,13 +32,8 @@ def plot_results(model, dataset, image_count, path="vqvae.png", idxs=None):
         images_pred = model(images_gt.to(device))["output"]
     images_pred = images_pred.cpu().detach()
 
-    # denormalize imagenet images
-    mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
-    images_gt = images_gt * std + mean
-    images_pred = images_pred * std + mean
-    images_gt = torch.clamp(images_gt, 0, 1)
-    images_pred = torch.clamp(images_pred, 0, 1)
+    images_gt = denormalize(images_gt, stats)
+    images_pred = denormalize(images_pred, stats)
 
     grid_pred = torchvision.utils.make_grid(images_pred, nrow=4)
     grid = torchvision.utils.make_grid(images_gt, nrow=4)
@@ -68,7 +53,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = model_configs[args.dataset]
-    C, SZ= config["channels"], config["image_sz"]
+    C, SZ = config["channels"], config["image_sz"]
 
     print(f"training VQ-VAE on the {args.dataset} dataset")
 
@@ -102,22 +87,6 @@ if __name__ == "__main__":
             persistent_workers=False
     )
 
-    # for x, _ in train_loader:
-        # x = x.to(device)
-        # print(x[:,0].min(), x[:,0].max())
-        # print(x[:,1].min(), x[:,1].max())
-        # print(x[:,2].min(), x[:,2].max())
-
-        # image = denormalize(x[0].cpu().detach()).squeeze()
-        # print(image.shape)
-        # plt.imshow(image.permute(1, 2, 0).numpy().astype("uint8"))
-        # plt.savefig("test.png")
-
-
-        # break
-    # exit()
-
-
     model = VQVAE(config).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=5e-4)
     crit = nn.MSELoss()
@@ -128,9 +97,7 @@ if __name__ == "__main__":
     best_model = None
 
     for epoch in range(100):
-        r_loss = 0
-        q_loss = 0
-        count = 0
+        r_loss, q_loss, count = 0, 0, 0
         st = time.time()
         for x, _ in tqdm.tqdm(train_loader):
             x = x.to(device)
@@ -151,7 +118,7 @@ if __name__ == "__main__":
         if val_r_loss + val_q_loss < best_loss:
             best_loss = val_r_loss + val_q_loss
             torch.save(model.state_dict(), f"checkpoints/{args.dataset}_best.pth")
-            plot_results(model, test_dataset, 16, path=f"results/{args.dataset}_{epoch}.png", idxs=idxs)
+            plot_results(model, test_dataset, config["stats"], path=f"results/{args.dataset}_{epoch}.png", idxs=idxs)
 
         print(f"e={epoch:2}, trn_r_l={r_loss:.4f}, val_r_l={val_r_loss:.4f}, trn_q_l={q_loss:.4f}, val_q_l={val_q_loss:.4f}, t={(time.time() - st):.2f} s")
 
