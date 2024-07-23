@@ -1,18 +1,18 @@
 import torch, torch.nn as nn
 
-HID = 128
-RES_HID = 32
+HID = 256
+RES_HID = 128
 
 class Encoder(nn.Module):
     def __init__(self, input_channels, D):
         super(Encoder, self).__init__()
         self.conv_block = nn.Sequential(
-            nn.Conv2d(input_channels, HID, 4, stride=2, padding=1),
-            nn.BatchNorm2d(HID),
-            nn.ReLU(),
-            nn.Conv2d(HID, RES_HID, 4, stride=2, padding=1),
+            nn.Conv2d(input_channels, RES_HID, 4, stride=2, padding=1),
             nn.BatchNorm2d(RES_HID),
             nn.ReLU(),
+            # nn.Conv2d(HID, RES_HID, 4, stride=2, padding=1),
+            # nn.BatchNorm2d(RES_HID),
+            # nn.ReLU(),
         )
 
         self.res1 = nn.Sequential(
@@ -52,10 +52,10 @@ class Decoder(nn.Module):
         )
 
         self.convtrans_block = nn.Sequential(
-            nn.ConvTranspose2d(RES_HID, HID, 4, stride=2, padding=1),
-            nn.BatchNorm2d(HID),
-            nn.ReLU(),
-            nn.ConvTranspose2d(HID, input_channels, 4, stride=2, padding=1),
+            # nn.ConvTranspose2d(RES_HID, HID, 4, stride=2, padding=1),
+            # nn.BatchNorm2d(HID),
+            # nn.ReLU(),
+            nn.ConvTranspose2d(RES_HID, input_channels, 4, stride=2, padding=1),
         )
         self.proj = nn.Conv2d(D, RES_HID, 1, stride=1, padding=0)
 
@@ -75,8 +75,11 @@ class VQVAE(nn.Module):
         self.decoder = Decoder(config["channels"], self.D)
 
     def decode(self, z):
+        z = torch.clamp(z, 0, self.K-1)
+
         quantized = self.embedding(z)
-        quantized = quantized.view(1, self.D, self.image_sz//4, self.image_sz//4)
+        # quantized = quantized.view(1, self.D, self.image_sz//4, self.image_sz//4)
+        quantized = quantized.view(1, self.D, self.image_sz//2, self.image_sz//2)
         return self.decoder(quantized)
 
     def forward(self, x, verbose=False):

@@ -58,9 +58,7 @@ if __name__ == "__main__":
 
     config = model_configs[args.dataset]
     C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
-    bs, lr, epochs = 128, 3e-5, 1000
-
-
+    bs, lr, epochs = 128, 3e-4, 1000
 
     wandb.init(project="vqvae",
                name=run_name,
@@ -83,7 +81,7 @@ if __name__ == "__main__":
 
     idxs = torch.randint(0, len(test_dataset), (16,))
 
-    Path("results").mkdir(exist_ok=True)
+    # Path("results").mkdir(exist_ok=True)
     Path("checkpoints").mkdir(exist_ok=True)
 
     train_loader = DataLoader(
@@ -142,14 +140,14 @@ if __name__ == "__main__":
                    "val_quantize_loss": val_q_loss})
 
         if epoch % 10 == 0:
-            plot_results(model, test_dataset, config["stats"], path=f"results/{args.dataset}_{epoch}.png", idxs=idxs)
-            wandb.save(f"results/{args.dataset}_{epoch}.png")
+            plot_results(model, test_dataset, config["stats"], path=run_folder / f"{args.dataset}_{epoch}.png", idxs=idxs)
+            wandb.save(run_folder / f"{args.dataset}_{epoch}.png")
 
         if val_r_loss + val_q_loss < best_loss:
             best_loss = val_r_loss + val_q_loss
-            torch.save(model.state_dict(), f"checkpoints/{args.dataset}_best.pth")
+            torch.save(model.state_dict(), run_folder / f"{args.dataset}_best.pth")
 
         print(f"e={epoch:2}, trn_r_l={r_loss:.4f}, val_r_l={val_r_loss:.4f}, trn_q_l={q_loss:.4f}, val_q_l={val_q_loss:.4f}, t={(time.time() - st):.2f} s")
 
-    model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth"))
+    model.load_state_dict(torch.load(run_folder / f"{args.dataset}_best.pth"))
     plot_results(model, test_dataset, config["stats"], path=f"{args.dataset}_random_sample.png")

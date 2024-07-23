@@ -22,7 +22,7 @@ cifar10_trans = transforms.Compose([
     transforms.Normalize(cifar10_stats[0], cifar10_stats[1]),
 ])
 cifar10_config = {
-    'K': 512,
+    'K': 1024,
     'D': 64,
     'channels': 3,
     'image_sz': 32,

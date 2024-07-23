@@ -8,6 +8,7 @@ from gpt import GPTLanguageModel
 from utils import get_free_gpu
 
 device = torch.device(get_free_gpu())
+# device = torch.device("cpu")
 print("selected device: ", device)
 
 def generate_sample(path):
@@ -16,8 +17,10 @@ def generate_sample(path):
         context = torch.zeros((1, 1), dtype=torch.long, device=device)
         idx = torch.randint(0, tokens.shape[0], (1,))
         context[0, 0] = tokens[idx,0]
+        print(context[0, 0])
 
         res = gpt.generate(context, IMAGE_TOKENS-1)
+        res = res[:,1:]
         img = model.decode(res)
 
         if args.dataset == "imagenet":
@@ -41,18 +44,20 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
 
-
     run_name = f"gpt-{args.dataset}-{time.time():.0f}"
+    print("run_name: ", run_name)
+
     run_folder = Path("runs") / run_name
     run_folder.mkdir(exist_ok=True, parents=True)
 
 
     config = model_configs[args.dataset]
     C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
-    IMAGE_TOKENS = (SZ//4)**2
+    CONVS = 2
+    IMAGE_TOKENS = (SZ//CONVS)**2+1
     block_size = IMAGE_TOKENS-1
-    batch_size = 512
-    eval_iters = 50
+    batch_size = 64
+    eval_iters = 10
     eval_interval = 100
     max_iters = 500000
     print(f"dataset={args.dataset}, {C=}, {SZ=}, {IMAGE_TOKENS=}, {block_size=}, {batch_size=}\
@@ -60,10 +65,10 @@ if __name__ == "__main__":
 
     gpt_config = {
         "block_size": block_size,
-        "vocab_size": K,
-        "n_embd": 768,
-        "n_head": 6,
-        "n_layer": 6,
+        "vocab_size": K+10,
+        "n_embd": 364,
+        "n_head": 4,
+        "n_layer": 2,
     }
 
     wandb.init(project="gpt-vqvae",
@@ -84,7 +89,7 @@ if __name__ == "__main__":
     train_loader = DataLoader(
             train_dataset, 
             batch_size=128, 
-            shuffle=True, 
+            shuffle=False,
             num_workers=8, 
             prefetch_factor=4, 
             pin_memory=True,
@@ -104,80 +109,95 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth"))
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-    for x, _ in tqdm.tqdm(test_loader):
-        x = x.to(device)
+    for x, y in tqdm.tqdm(test_loader):
+        x, y = x.to(device), y.to(device)
         quantized = model(x)["closest"]
+        quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
         tokens = torch.cat([tokens, quantized], dim=0)
 
-    for x, _ in tqdm.tqdm(train_loader):
-        x = x.to(device)
+    # for x, _ in tqdm.tqdm(train_loader):
+        # x = x.to(device)
+        # quantized = model(x)["closest"]
+        # tokens = torch.cat([tokens, quantized], dim=0)
+    for x, y in tqdm.tqdm(train_loader):
+        x, y = x.to(device), y.to(device)
         quantized = model(x)["closest"]
+        quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
         tokens = torch.cat([tokens, quantized], dim=0)
 
-    tokens = tokens[:1000000]
     tokens = tokens[torch.randperm(tokens.shape[0])]
+    tokens = tokens.to(torch.device("cpu"))
+
 
     print("tokens shape: ", tokens.shape)
     print("tokens_count: ", tokens.view(-1).shape[0])
 
 
     gpt = GPTLanguageModel(**gpt_config).to(device)
+    params = sum(p.numel() for p in gpt.parameters())
+    print(f"number of parameters: {params / 1_000_000:.1f}M")
     wandb.watch(gpt)
     gpt.train()
 
+    class TokenDataset(torch.utils.data.Dataset):
+        def __init__(self, tokens):
+            self.tokens = tokens
+            self.block_size = block_size
+
+        def __len__(self):
+            return self.tokens.shape[0]
+
+        def __getitem__(self, idx):
+            return self.tokens[idx, :self.block_size], self.tokens[idx, 1:self.block_size+1]
 
     optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
 
     split = int(0.8 * len(tokens))
     train_tokens, val_tokens = tokens[:split], tokens[split:]
-
-    def get_batch(data):
-        # generate a small batch of data of inputs x and targets y
-        ix = torch.randint(data.shape[0], (batch_size,))
-        x = torch.stack([data[i,0:block_size] for i in ix])
-        y = torch.stack([data[i,1:block_size+1] for i in ix])
-        x, y = x.to(device), y.to(device)
-        return x, y
+    train_dataset = TokenDataset(train_tokens)
+    val_dataset = TokenDataset(val_tokens)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
 
     @torch.no_grad()
-    def estimate_loss():
-        out = {}
-        model.eval()
-        for split in ['train', 'val']:
-            losses = torch.zeros(eval_iters)
-            for k in range(eval_iters):
-                X, Y = get_batch(train_tokens if split == 'train' else val_tokens)
-                _, loss = gpt(X, Y)
-                losses[k] = loss.item()
-            out[split] = losses.mean()
-        model.train()
-        return out
+    def eval():
+        losses = []
+        for xb, yb in val_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            _, loss = gpt(xb, yb)
+            losses.append(loss.item())
+        return torch.tensor(losses).mean().item()
 
     Path("gens").mkdir(exist_ok=True)
 
     best_val_loss = float('inf')
 
+    # bar = tqdm.tqdm(range(max_iters))
     for iter in range(max_iters):
-        # every once in a while evaluate the loss on train and val sets
-        if iter % eval_interval == 0 or iter == max_iters-1:
-            losses = estimate_loss()
-            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-            generate_sample(run_folder / f"{args.dataset}_generated_{iter}.png")
-            wandb.log({"train_loss": losses["train"], "val_loss": losses["val"]})
-            wandb.save(run_folder / f"{args.dataset}_generated_{iter}.png")
 
-            if losses["val"] < best_val_loss:
-                best_val_loss = losses["val"]
-                torch.save({"model": model.state_dict(), "optim": optim.state_dict(), "step": iter},
-                       run_folder / f"best_model.pth")
+        start_time = time.time()
+        # for xb, yb in train_loader:
+        for xb, yb in tqdm.tqdm(train_loader):
+            xb, yb = xb.to(device), yb.to(device)
 
-        # sample a batch of data
-        xb, yb = get_batch(train_tokens)
+            logits, loss = gpt(xb, yb)
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
 
-        # evaluate the loss
-        logits, loss = gpt(xb, yb)
-        optim.zero_grad(set_to_none=True)
-        loss.backward()
-        optim.step()
+            full_time = time.time() - start_time
+            start_time = time.time()
+
+            # bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
+            # bar.update(1)
+
+        # losses = []
+        # for xb, yb in val_loader:
+            # xb, yb = xb.to(device), yb.to(device)
+            # _, loss = gpt(xb, yb)
+            # losses.append(loss.item())
+        # val_loss = torch.tensor(losses).mean().item()
+        print(f"validation loss: {eval():.4f}")
+        generate_sample(run_folder / f"{iter}.png")
 
     torch.save(gpt.state_dict(), f"checkpoints/{args.dataset}_gpt.pth")
