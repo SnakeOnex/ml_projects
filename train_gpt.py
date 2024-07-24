@@ -106,7 +106,7 @@ if __name__ == "__main__":
     )
 
     model = VQVAE(config).to(device)
-    model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth"))
+    model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
     for x, y in tqdm.tqdm(test_loader):
@@ -172,12 +172,12 @@ if __name__ == "__main__":
 
     best_val_loss = float('inf')
 
-    # bar = tqdm.tqdm(range(max_iters))
     for iter in range(max_iters):
 
+        bar = tqdm.tqdm(range(len(train_loader)))
         start_time = time.time()
         # for xb, yb in train_loader:
-        for xb, yb in tqdm.tqdm(train_loader):
+        for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
 
             logits, loss = gpt(xb, yb)
@@ -188,8 +188,8 @@ if __name__ == "__main__":
             full_time = time.time() - start_time
             start_time = time.time()
 
-            # bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
-            # bar.update(1)
+            bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
+            bar.update(1)
 
         # losses = []
         # for xb, yb in val_loader:
