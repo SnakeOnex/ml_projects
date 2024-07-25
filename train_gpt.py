@@ -1,17 +1,17 @@
-import argparse, time, time, tqdm, PIL, wandb
+import argparse, time, time, tqdm, PIL, wandb, numpy as np, pickle
 import torch, torch.nn as nn, torchvision
 from pathlib import Path
 from torch.utils.data import DataLoader
 from vqvae import VQVAE
 from model_configs import model_configs
 from gpt import GPTLanguageModel
-from utils import get_free_gpu
+from utils import get_free_gpu, denormalize
 
 device = torch.device(get_free_gpu())
 # device = torch.device("cpu")
 print("selected device: ", device)
 
-def generate_sample(path):
+def generate_sample(path, stats):
     images = torch.zeros((0,C,SZ,SZ)).to(device)
     for _ in range(16):
         context = torch.zeros((1, 1), dtype=torch.long, device=device)
@@ -23,11 +23,13 @@ def generate_sample(path):
         res = res[:,1:]
         img = model.decode(res)
 
-        if args.dataset == "imagenet":
-            mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, C, 1, 1).to(device)
-            std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1).to(device)
-            img = img * std + mean
-            img = torch.clamp(img, 0, 1)
+        img = denormalize(img, stats)
+
+        # if args.dataset == "imagenet":
+            # mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, C, 1, 1).to(device)
+            # std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1).to(device)
+            # img = img * std + mean
+            # img = torch.clamp(img, 0, 1)
         images = torch.cat([images, img], dim=0)
 
     grid_pred = torchvision.utils.make_grid(images, nrow=4)
@@ -109,23 +111,28 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-    for x, y in tqdm.tqdm(test_loader):
-        x, y = x.to(device), y.to(device)
-        quantized = model(x)["closest"]
-        quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-        tokens = torch.cat([tokens, quantized], dim=0)
+    # for x, y in tqdm.tqdm(test_loader):
+        # x, y = x.to(device), y.to(device)
+        # quantized = model(x)["closest"]
+        # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
+        # tokens = torch.cat([tokens, quantized], dim=0)
+        # break
 
     # for x, _ in tqdm.tqdm(train_loader):
         # x = x.to(device)
         # quantized = model(x)["closest"]
         # tokens = torch.cat([tokens, quantized], dim=0)
+
     for x, y in tqdm.tqdm(train_loader):
         x, y = x.to(device), y.to(device)
         quantized = model(x)["closest"]
         quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
+        print("quant: ", quantized)
         tokens = torch.cat([tokens, quantized], dim=0)
+        break
 
-    tokens = tokens[torch.randperm(tokens.shape[0])]
+
+    # tokens = tokens[torch.randperm(tokens.shape[0])]
     tokens = tokens.to(torch.device("cpu"))
 
 
@@ -154,6 +161,39 @@ if __name__ == "__main__":
 
     split = int(0.8 * len(tokens))
     train_tokens, val_tokens = tokens[:split], tokens[split:]
+
+    loaded_tokens = torch.load("generated.pt")
+    print(loaded_tokens.shape)
+    # exit(0)
+
+    print(train_tokens[0,:].shape)
+    data = train_tokens[0,:].numpy()
+    print("mean: ", np.mean(data), np.max(data), np.min(data))
+
+    print("first_tok: ", train_tokens[0,:])
+    for i in range(10):
+        img = model.decode(loaded_tokens[i,1:].to(device).unsqueeze(0))
+        img = denormalize(img, config["stats"])
+
+        img = img.squeeze(0).permute(1, 2, 0).cpu().detach().numpy()
+        img = (img * 255).astype("uint8")
+        img = PIL.Image.fromarray(img)
+        img.save(f"gens/test_{i}.png")
+    exit(0)
+
+    # save as .bin files
+    train_tokens_np = train_tokens.to(torch.device("cpu")).numpy().astype("uint16")
+    val_tokens_np = val_tokens.to(torch.device("cpu")).numpy().astype("uint16")
+
+    train_tokens_np.tofile("../nanoGPT/data/imagegen/train.bin")
+    val_tokens_np.tofile("../nanoGPT/data/imagegen/val.bin")
+
+    meta = {"vocab_size": K+10}
+    with open("../nanoGPT/data/imagegen/meta.pkl", "wb") as f:
+        pickle.dump(meta, f)
+
+    exit(0)
+
     train_dataset = TokenDataset(train_tokens)
     val_dataset = TokenDataset(val_tokens)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)

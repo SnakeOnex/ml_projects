@@ -9,6 +9,6 @@ def get_free_gpu():
     return f"cuda:{min_mem_gpu}"
 
 def denormalize(x, stats):
-    mean = torch.tensor(stats[0]).reshape(1, x.shape[1], 1, 1)
-    std = torch.tensor(stats[1]).reshape(1, x.shape[1], 1, 1)
+    mean = torch.tensor(stats[0]).reshape(1, x.shape[1], 1, 1).to(x.device)
+    std = torch.tensor(stats[1]).reshape(1, x.shape[1], 1, 1).to(x.device)
     return torch.clamp(x * std + mean, 0, 1)
