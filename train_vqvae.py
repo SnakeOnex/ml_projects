@@ -55,6 +55,7 @@ if __name__ == "__main__":
     run_name = f"vqvae-{args.dataset}-{time.time():.0f}"
     run_folder = Path("runs_vqvae") / run_name
     run_folder.mkdir(exist_ok=True, parents=True)
+    print("running: ", run_name)
 
     config = model_configs[args.dataset]
     C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
@@ -70,8 +71,6 @@ if __name__ == "__main__":
                        "SZ": SZ,
                        "C": C,
                        })
-
-    print(f"training VQ-VAE on the {args.dataset} dataset")
 
     train_dataset, test_dataset = config["fetch_train"](), config["fetch_test"]()
 

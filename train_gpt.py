@@ -17,7 +17,7 @@ def generate_sample(path, stats):
         context = torch.zeros((1, 1), dtype=torch.long, device=device)
         idx = torch.randint(0, tokens.shape[0], (1,))
         context[0, 0] = tokens[idx,0]
-        print(context[0, 0])
+        # print(context[0, 0])
 
         res = gpt.generate(context, IMAGE_TOKENS-1)
         res = res[:,1:]
@@ -25,11 +25,6 @@ def generate_sample(path, stats):
 
         img = denormalize(img, stats)
 
-        # if args.dataset == "imagenet":
-            # mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, C, 1, 1).to(device)
-            # std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1).to(device)
-            # img = img * std + mean
-            # img = torch.clamp(img, 0, 1)
         images = torch.cat([images, img], dim=0)
 
     grid_pred = torchvision.utils.make_grid(images, nrow=4)
@@ -55,7 +50,7 @@ if __name__ == "__main__":
 
     config = model_configs[args.dataset]
     C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
-    CONVS = 2
+    CONVS = 4
     IMAGE_TOKENS = (SZ//CONVS)**2+1
     block_size = IMAGE_TOKENS-1
     batch_size = 64
@@ -111,12 +106,11 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-    # for x, y in tqdm.tqdm(test_loader):
-        # x, y = x.to(device), y.to(device)
-        # quantized = model(x)["closest"]
-        # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-        # tokens = torch.cat([tokens, quantized], dim=0)
-        # break
+    for x, y in tqdm.tqdm(test_loader):
+        x, y = x.to(device), y.to(device)
+        quantized = model(x)["closest"]
+        quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
+        tokens = torch.cat([tokens, quantized], dim=0)
 
     # for x, _ in tqdm.tqdm(train_loader):
         # x = x.to(device)
@@ -127,10 +121,7 @@ if __name__ == "__main__":
         x, y = x.to(device), y.to(device)
         quantized = model(x)["closest"]
         quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-        print("quant: ", quantized)
         tokens = torch.cat([tokens, quantized], dim=0)
-        break
-
 
     # tokens = tokens[torch.randperm(tokens.shape[0])]
     tokens = tokens.to(torch.device("cpu"))
@@ -162,38 +153,6 @@ if __name__ == "__main__":
     split = int(0.8 * len(tokens))
     train_tokens, val_tokens = tokens[:split], tokens[split:]
 
-    loaded_tokens = torch.load("generated.pt")
-    print(loaded_tokens.shape)
-    # exit(0)
-
-    print(train_tokens[0,:].shape)
-    data = train_tokens[0,:].numpy()
-    print("mean: ", np.mean(data), np.max(data), np.min(data))
-
-    print("first_tok: ", train_tokens[0,:])
-    for i in range(10):
-        img = model.decode(loaded_tokens[i,1:].to(device).unsqueeze(0))
-        img = denormalize(img, config["stats"])
-
-        img = img.squeeze(0).permute(1, 2, 0).cpu().detach().numpy()
-        img = (img * 255).astype("uint8")
-        img = PIL.Image.fromarray(img)
-        img.save(f"gens/test_{i}.png")
-    exit(0)
-
-    # save as .bin files
-    train_tokens_np = train_tokens.to(torch.device("cpu")).numpy().astype("uint16")
-    val_tokens_np = val_tokens.to(torch.device("cpu")).numpy().astype("uint16")
-
-    train_tokens_np.tofile("../nanoGPT/data/imagegen/train.bin")
-    val_tokens_np.tofile("../nanoGPT/data/imagegen/val.bin")
-
-    meta = {"vocab_size": K+10}
-    with open("../nanoGPT/data/imagegen/meta.pkl", "wb") as f:
-        pickle.dump(meta, f)
-
-    exit(0)
-
     train_dataset = TokenDataset(train_tokens)
     val_dataset = TokenDataset(val_tokens)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -214,30 +173,39 @@ if __name__ == "__main__":
 
     for iter in range(max_iters):
 
-        bar = tqdm.tqdm(range(len(train_loader)))
+        # bar = tqdm.tqdm(range(len(train_loader)), position=0)
         start_time = time.time()
-        # for xb, yb in train_loader:
+        train_losses = []
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
 
-            logits, loss = gpt(xb, yb)
+            _, loss = gpt(xb, yb)
             optim.zero_grad()
             loss.backward()
             optim.step()
+            train_losses.append(loss.item())
 
             full_time = time.time() - start_time
             start_time = time.time()
 
-            bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
-            bar.update(1)
+            # bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
+            # bar.update(1)
 
-        # losses = []
-        # for xb, yb in val_loader:
-            # xb, yb = xb.to(device), yb.to(device)
-            # _, loss = gpt(xb, yb)
-            # losses.append(loss.item())
-        # val_loss = torch.tensor(losses).mean().item()
-        print(f"validation loss: {eval():.4f}")
-        generate_sample(run_folder / f"{iter}.png")
+        valid_losses = []
+        for xb, yb in val_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            with torch.no_grad():
+                _, loss = gpt(xb, yb)
+            valid_losses.append(loss.item())
+
+        valid_loss = torch.tensor(valid_losses).mean().item()
+        train_loss = torch.tensor(train_losses).mean().item()
+        wandb.log({"train_loss": train_loss, "valid_loss": valid_loss})
+
+        if valid_loss < best_val_loss:
+            best_val_loss = valid_loss
+            torch.save(gpt.state_dict(), run_folder / f"{args.dataset}_gpt.pth")
+        print(f"{iter=}, {train_loss=:.3f}, {valid_loss=:.3f}")
+        generate_sample(run_folder / f"{iter}.png", config["stats"])
 
     torch.save(gpt.state_dict(), f"checkpoints/{args.dataset}_gpt.pth")
