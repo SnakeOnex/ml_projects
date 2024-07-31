@@ -1,86 +1,102 @@
 import torch, torch.nn as nn
+from dataclasses import dataclass
 
-HID = 256
-RES_HID = 128
+@dataclass
+class VQVAEConfig:
+    in_channels: int = 3
+    image_sz: int = 32
+    ch_base: int = 32
+    ch_mult: tuple[int] = (1, 2)
+    K: int = 512
+    D: int = 64
+
+    @property
+    def num_resolutions(self):
+        return len(self.ch_mult)
+
+    @property
+    def downsample_factor(self):
+        return 2**num_resolutions
+
+    @property
+    def final_channels(self):
+        return self.ch_base * self.ch_mult[-1]
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResBlock, self).__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
+        )
+    def forward(self, x):
+        return self.block(x) + x
 
 class Encoder(nn.Module):
-    def __init__(self, input_channels, D):
+    def __init__(self, config: VQVAEConfig):
         super(Encoder, self).__init__()
-        self.conv_block = nn.Sequential(
-            nn.Conv2d(input_channels, HID, 4, stride=2, padding=1),
-            nn.BatchNorm2d(HID),
-            nn.ReLU(),
-            nn.Conv2d(HID, RES_HID, 4, stride=2, padding=1),
-            nn.BatchNorm2d(RES_HID),
-            nn.ReLU(),
-        )
+        self.config = config
 
-        self.res1 = nn.Sequential(
-            nn.Conv2d(RES_HID, RES_HID, 3, stride=1, padding=1),
-            nn.BatchNorm2d(RES_HID),
-            nn.ReLU(),
-        )
+        self.conv_in = torch.nn.Conv2d(self.config.in_channels, self.config.ch_base, kernel_size=3, stride=1, padding=1)
 
-        self.res2 = nn.Sequential(
-            nn.Conv2d(RES_HID, RES_HID, 1, stride=1, padding=0),
-            nn.BatchNorm2d(RES_HID),
-            nn.ReLU(),  
-        )
+        self.downsample = nn.ModuleList()
+        for i in range(self.config.num_resolutions-1):
+            self.downsample.append(nn.Sequential(
+                ResBlock(self.config.ch_base * self.config.ch_mult[i], self.config.ch_base * self.config.ch_mult[i]),
+                nn.Conv2d(self.config.ch_base * self.config.ch_mult[i], self.config.ch_base * self.config.ch_mult[i+1], kernel_size=4, stride=2, padding=1),
+            ))
 
-        self.proj = nn.Conv2d(RES_HID, D, 1, stride=1, padding=0)
+        self.res_layer = ResBlock(self.config.final_channels, self.config.final_channels)
+
+        self.proj = nn.Conv2d(self.config.final_channels, self.config.D, 1, stride=1, padding=0)
 
     def forward(self, x):
-        x = self.conv_block(x)
-        x = x + self.res1(x)
-        x = x + self.res2(x)
-        x = self.proj(x)
-        return x
+        x = self.conv_in(x)
+        for layer in self.downsample: x = layer(x)
+        x = self.res_layer(x)
+        return self.proj(x)
 
 class Decoder(nn.Module):
-    def __init__(self, input_channels, D):
+    def __init__(self, config: VQVAEConfig):
         super(Decoder, self).__init__()
-        self.res1 = nn.Sequential(
-            nn.Conv2d(RES_HID, RES_HID, 3, stride=1, padding=1),
-            nn.BatchNorm2d(RES_HID),
-            nn.ReLU(),
-        )
+        self.config = config
 
-        self.res2 = nn.Sequential(
-            nn.Conv2d(RES_HID, RES_HID, 3, stride=1, padding=1),
-            nn.BatchNorm2d(RES_HID),
-            nn.ReLU(),  
-        )
+        self.res_layer = ResBlock(self.config.final_channels, self.config.final_channels)
 
-        self.convtrans_block = nn.Sequential(
-            nn.ConvTranspose2d(RES_HID, HID, 4, stride=2, padding=1),
-            nn.BatchNorm2d(HID),
-            nn.ReLU(),
-            nn.ConvTranspose2d(HID, input_channels, 4, stride=2, padding=1),
-        )
-        self.proj = nn.Conv2d(D, RES_HID, 1, stride=1, padding=0)
+        self.upsample = nn.ModuleList()
+        for i in range(self.config.num_resolutions-1, 0, -1):
+            self.upsample.append(nn.Sequential(
+                ResBlock(self.config.ch_base * self.config.ch_mult[i], self.config.ch_base * self.config.ch_mult[i]),
+                nn.ConvTranspose2d(self.config.ch_base * self.config.ch_mult[i], self.config.ch_base * self.config.ch_mult[i-1], kernel_size=4, stride=2, padding=1),
+            ))
+        self.proj = nn.Conv2d(self.config.D, self.config.final_channels, 3, stride=1, padding=1)
+        self.conv_out = nn.Conv2d(self.config.ch_base, self.config.in_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
         x = self.proj(x)
-        x = x + self.res1(x)
-        x = x + self.res2(x)
-        x = self.convtrans_block(x)
+        x = self.res_layer(x)
+        for layer in self.upsample: x = layer(x)
+        x = self.conv_out(x)
         return x
 
 class VQVAE(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: VQVAEConfig):
         super(VQVAE, self).__init__()
-        self.K, self.D, self.image_sz = config["K"], config["D"], config["image_sz"]
-        self.encoder = Encoder(config["channels"], self.D)
-        self.embedding = nn.Embedding(num_embeddings=self.K, embedding_dim=self.D)
-        self.decoder = Decoder(config["channels"], self.D)
+        self.config = config
+        self.encoder = Encoder(self.config)
+        self.embedding = nn.Embedding(num_embeddings=self.config.K, embedding_dim=self.config.D)
+        self.decoder = Decoder(self.config)
 
     def decode(self, z):
-        z = torch.clamp(z, 0, self.K-1)
+        z = torch.clamp(z, 0, self.config.K-1)
 
         quantized = self.embedding(z)
         print("Quantized shape:", quantized.shape)
-        quantized = quantized.view(1, self.D, self.image_sz//4, self.image_sz//4)
-        # quantized = quantized.view(1, self.D, self.image_sz//2, self.image_sz//2)
+        quantized = quantized.view(1, self.config.D, self.config.image_sz//4, self.config.image_sz//4)
         return self.decoder(quantized)
 
     def forward(self, x, verbose=False):
@@ -91,7 +107,7 @@ class VQVAE(nn.Module):
 
         B, C, H, W = enc.shape
         quant_input = enc.view(B, -1, C) # reshape to be B x -1 x C
-        embed_expanded = self.embedding.weight.view(1, self.K, self.D).expand(B, self.K, self.D)
+        embed_expanded = self.embedding.weight.view(1, self.config.K, self.config.D).expand(B, self.config.K, self.config.D)
         dists = torch.cdist(quant_input, embed_expanded)
         closest = torch.argmin(dists, dim=-1)
         quantized = self.embedding(closest)
@@ -99,7 +115,7 @@ class VQVAE(nn.Module):
         if verbose: print("Quantized shape:", closest.shape) 
         if verbose: print("Quantized shape:", closest.view(-1)) 
 
-        enc = enc.view(B, -1, self.D)
+        enc = enc.view(B, -1, self.config.D)
         # losses
         commitment_loss = torch.mean((quantized.detach() - enc)**2)
         codebook_loss = torch.mean((quantized - enc.detach())**2)
@@ -109,5 +125,7 @@ class VQVAE(nn.Module):
         quant_out = enc + (quantized - enc).detach()
         quant_out = quant_out.view(B, C, H, W)
         output = self.decoder(quant_out)
+        assert output.shape == x.shape, f"Output shape {output.shape} != input shape {x.shape}"
+
 
         return {"output": output, "closest": closest, "quantize_loss": quantize_loss}

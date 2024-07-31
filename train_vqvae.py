@@ -58,7 +58,7 @@ if __name__ == "__main__":
     print("running: ", run_name)
 
     config = model_configs[args.dataset]
-    C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
+    vqvae_config = config["vqvae_config"]
     bs, lr, epochs = 128, 3e-4, 1000
 
     wandb.init(project="vqvae",
@@ -67,15 +67,13 @@ if __name__ == "__main__":
                        "batch_size": bs, 
                        "epochs": epochs,
                        "lr": lr,
-                       "K": K,
-                       "SZ": SZ,
-                       "C": C,
+                       "vqvae_config": vqvae_config.__dict__
                        })
 
     train_dataset, test_dataset = config["fetch_train"](), config["fetch_test"]()
 
     print(f"train_sz={len(train_dataset)}, test_sz={len(test_dataset)}")
-    print(f"K={config['K']}, D={config['D']}")
+    print(f"K={vqvae_config.K}, D={vqvae_config.D}")
 
 
     idxs = torch.randint(0, len(test_dataset), (16,))
@@ -102,12 +100,12 @@ if __name__ == "__main__":
             persistent_workers=False
     )
 
-    model = VQVAE(config).to(device)
+    model = VQVAE(vqvae_config).to(device)
     wandb.watch(model)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     crit = nn.MSELoss()
 
-    with torch.no_grad(): model(torch.randn(1, C, SZ, SZ).to(device), verbose=True)
+    with torch.no_grad(): model(torch.randn(1, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device), verbose=True)
 
     best_loss = float("inf")
     best_model = None
