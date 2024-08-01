@@ -38,7 +38,8 @@ def generate_sample(path, stats):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--save_tokens", action="store_true")
     args = parser.parse_args()
 
     run_name = f"gpt-{args.dataset}-{time.time():.0f}"
@@ -49,11 +50,14 @@ if __name__ == "__main__":
 
 
     config = model_configs[args.dataset]
-    C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
-    CONVS = 4
-    IMAGE_TOKENS = (SZ//CONVS)**2+1
+    vqvae_config = config["vqvae_config"]
+    # C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
+    C, SZ, K, D = vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.K, vqvae_config.D
+    CONVS = vqvae_config.num_resolutions-1
+    # IMAGE_TOKENS = (SZ//CONVS)**2+1
+    IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
     block_size = IMAGE_TOKENS-1
-    batch_size = 64
+    batch_size = 128
     eval_iters = 10
     eval_interval = 100
     max_iters = 500000
@@ -63,9 +67,9 @@ if __name__ == "__main__":
     gpt_config = {
         "block_size": block_size,
         "vocab_size": K+10,
-        "n_embd": 364,
-        "n_head": 4,
-        "n_layer": 2,
+        "n_embd": 1024,
+        "n_head": 12,
+        "n_layer": 12,
     }
 
     wandb.init(project="gpt-vqvae",
@@ -102,7 +106,7 @@ if __name__ == "__main__":
             persistent_workers=False
     )
 
-    model = VQVAE(config).to(device)
+    model = VQVAE(vqvae_config).to(device)
     model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
@@ -153,10 +157,19 @@ if __name__ == "__main__":
     split = int(0.8 * len(tokens))
     train_tokens, val_tokens = tokens[:split], tokens[split:]
 
+    if args.save_tokens:
+        train_tokens_np = train_tokens.to(torch.device("cpu")).numpy().astype("uint16")
+        val_tokens_np = val_tokens.to(torch.device("cpu")).numpy().astype("uint16")
+        train_tokens_np.tofile(run_folder / "train.bin")
+        val_tokens_np.tofile(run_folder / "val.bin")
+        meta = {"vocab_size": K+10, "block_size": block_size}
+        with open(run_folder / "meta.pkl", "wb") as f: pickle.dump(meta, f)
+        exit(0)
+
     train_dataset = TokenDataset(train_tokens)
     val_dataset = TokenDataset(val_tokens)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=4, persistent_workers=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=4, persistent_workers=False)
 
     @torch.no_grad()
     def eval():
@@ -173,7 +186,7 @@ if __name__ == "__main__":
 
     for iter in range(max_iters):
 
-        # bar = tqdm.tqdm(range(len(train_loader)), position=0)
+        bar = tqdm.tqdm(range(len(train_loader)), position=0)
         start_time = time.time()
         train_losses = []
         for xb, yb in train_loader:
@@ -188,8 +201,8 @@ if __name__ == "__main__":
             full_time = time.time() - start_time
             start_time = time.time()
 
-            # bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
-            # bar.update(1)
+            bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
+            bar.update(1)
 
         valid_losses = []
         for xb, yb in val_loader:
@@ -207,5 +220,8 @@ if __name__ == "__main__":
             torch.save(gpt.state_dict(), run_folder / f"{args.dataset}_gpt.pth")
         print(f"{iter=}, {train_loss=:.3f}, {valid_loss=:.3f}")
         generate_sample(run_folder / f"{iter}.png", config["stats"])
+
+        if iter % 5 == 0:
+            wandb.save(run_folder / f"{iter}.png")
 
     torch.save(gpt.state_dict(), f"checkpoints/{args.dataset}_gpt.pth")

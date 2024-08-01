@@ -16,7 +16,7 @@ class VQVAEConfig:
 
     @property
     def downsample_factor(self):
-        return 2**num_resolutions
+        return 2**(self.num_resolutions-1)
 
     @property
     def final_channels(self):
@@ -89,14 +89,15 @@ class VQVAE(nn.Module):
         self.config = config
         self.encoder = Encoder(self.config)
         self.embedding = nn.Embedding(num_embeddings=self.config.K, embedding_dim=self.config.D)
+        self.embedding.weight.data.uniform_(-1/self.config.K, 1/self.config.K)
         self.decoder = Decoder(self.config)
 
     def decode(self, z):
         z = torch.clamp(z, 0, self.config.K-1)
 
         quantized = self.embedding(z)
-        print("Quantized shape:", quantized.shape)
-        quantized = quantized.view(1, self.config.D, self.config.image_sz//4, self.config.image_sz//4)
+        # print("Quantized shape:", quantized.shape)
+        quantized = quantized.view(1, self.config.D, self.config.image_sz//self.config.downsample_factor, self.config.image_sz//self.config.downsample_factor)
         return self.decoder(quantized)
 
     def forward(self, x, verbose=False):

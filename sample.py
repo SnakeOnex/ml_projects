@@ -50,7 +50,8 @@ if __name__ == "__main__":
 
 
     config = model_configs[args.dataset]
-    C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
+    vqvae_config = config["vqvae_config"]
+    C, SZ, K, D = vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.K, vqvae_config.D
     CONVS = 4
     IMAGE_TOKENS = (SZ//CONVS)**2+1
     block_size = IMAGE_TOKENS-1
@@ -69,37 +70,11 @@ if __name__ == "__main__":
         "n_layer": 2,
     }
 
-    wandb.init(project="gpt-vqvae",
-               name=run_name,
-               config={"dataset": args.dataset, 
-                       "batch_size": batch_size, 
-                       "max_iters": max_iters,
-                       "lr": args.lr,
-                       "K": K,
-                       "SZ": SZ,
-                       "C": C,
-                       "gpt_config": gpt_config,
-                       })
 
-    model = VQVAE(config).to(device)
+    model = VQVAE(vqvae_config).to(device)
     model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
-
-    tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-
-    # for x, y in tqdm.tqdm(train_loader):
-        # x, y = x.to(device), y.to(device)
-        # quantized = model(x)["closest"]
-        # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-        # tokens = torch.cat([tokens, quantized], dim=0)
-
-    # tokens = tokens[torch.randperm(tokens.shape[0])]
-    # tokens = tokens.to(torch.device("cpu"))
-
-
-    print("tokens shape: ", tokens.shape)
-    print("tokens_count: ", tokens.view(-1).shape[0])
-
-
+    
+    """
     gpt = GPTLanguageModel(**gpt_config).to(device)
     gpt.load_state_dict(torch.load(f"checkpoints/{args.dataset}_gpt.pth", map_location=device))
     params = sum(p.numel() for p in gpt.parameters())
@@ -107,13 +82,18 @@ if __name__ == "__main__":
     wandb.watch(gpt)
     gpt.eval()
     model.eval()
+    """
 
-    # init = torch.randint(0, 10, (1, 1), device=device) + K
+    gened = torch.load("generated.pt", map_location=device)
+    print(gened.shape)
+    # exit(0)
 
     for i in range(10):
-        init = torch.tensor([32+i], dtype=torch.long, device=device).view(1, 1)
-        print(init)
-        tokens = gpt.generate(init, 49)
+        # init = torch.tensor([32+i], dtype=torch.long, device=device).view(1, 1)
+        # print(init)
+        # tokens = gpt.generate(init, 49)
+        tokens = gened[i:i+1,:]
+
         print(tokens.shape)
         print(tokens)
 
@@ -128,6 +108,7 @@ if __name__ == "__main__":
         print(image.shape)
         plt.imshow(image, cmap="gray")
         plt.savefig(f"gens/init_{i}.png")
+        # break
 
     exit(0)
 

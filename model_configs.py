@@ -7,7 +7,7 @@ mnist_trans = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mnist_stats[0], mnist_stats[1]),
 ])
-mnist_vqvae_config = VQVAEConfig(in_channels=1, image_sz=28, ch_base=16, ch_mult=(1,2), K=32, D=8)
+mnist_vqvae_config = VQVAEConfig(in_channels=1, image_sz=28, ch_base=16, ch_mult=(1,2,4,4), K=32, D=8)
 mnist_config = {
     'vqvae_config': mnist_vqvae_config,
     'stats': mnist_stats,
@@ -21,7 +21,7 @@ cifar10_trans = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(cifar10_stats[0], cifar10_stats[1]),
 ])
-cifar10_vqvae_config = VQVAEConfig(in_channels=3, image_sz=32, ch_base=32, ch_mult=(1,2), K=512, D=64)
+cifar10_vqvae_config = VQVAEConfig(in_channels=3, image_sz=32, ch_base=64, ch_mult=(1,2), K=512, D=64)
 cifar10_config = {
     'vqvae_config': cifar10_vqvae_config,
     'stats': cifar10_stats,
