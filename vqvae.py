@@ -1,4 +1,4 @@
-import torch, torch.nn as nn
+import torch, torch.nn as nn, torchvision.models as models
 from dataclasses import dataclass
 
 @dataclass
@@ -130,3 +130,34 @@ class VQVAE(nn.Module):
 
 
         return {"output": output, "closest": closest, "quantize_loss": quantize_loss}
+
+class PerceptualLoss(nn.Module):
+    def __init__(self):
+        super(PerceptualLoss, self).__init__()
+        vgg = models.vgg16(pretrained=True).features
+        self.slice1 = nn.Sequential(*vgg[:4])
+        self.slice2 = nn.Sequential(*vgg[4:9])
+        self.slice3 = nn.Sequential(*vgg[9:16])
+        self.slice4 = nn.Sequential(*vgg[16:23])
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, x, y):
+        x = self.slice1(x)
+        y = self.slice1(y)
+        loss = torch.nn.functional.l1_loss(x, y)
+
+        x = self.slice2(x)
+        y = self.slice2(y)
+        loss += torch.nn.functional.l1_loss(x, y)
+
+        x = self.slice3(x)
+        y = self.slice3(y)
+        loss += torch.nn.functional.l1_loss(x, y)
+
+        x = self.slice4(x)
+        y = self.slice4(y)
+        loss += torch.nn.functional.l1_loss(x, y)
+
+        return loss
+

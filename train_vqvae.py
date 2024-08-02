@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torchvision, argparse, time, time, tqdm, PIL, wandb
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqvae import VQVAE
+from vqvae import VQVAE, PerceptualLoss
 from model_configs import model_configs
 import matplotlib.pyplot as plt
 from utils import get_free_gpu, denormalize
@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
     config = model_configs[args.dataset]
     vqvae_config = config["vqvae_config"]
-    bs, lr, epochs = 128, 3e-4, 1000
+    bs, lr, epochs = 16, 3e-4, 1000
 
     wandb.init(project="vqvae",
                name=run_name,
@@ -78,32 +78,30 @@ if __name__ == "__main__":
 
     idxs = torch.randint(0, len(test_dataset), (16,))
 
-    # Path("results").mkdir(exist_ok=True)
     Path("checkpoints").mkdir(exist_ok=True)
 
     train_loader = DataLoader(
             train_dataset, 
             batch_size=bs, 
             shuffle=True, 
-            num_workers=16, 
-            prefetch_factor=4, 
+            num_workers=4, 
             pin_memory=True,
-            persistent_workers=False
+            persistent_workers=True
     )
     test_loader = DataLoader(
             test_dataset, 
             batch_size=bs, 
             shuffle=False, 
-            num_workers=16, 
-            prefetch_factor=4, 
+            num_workers=4, 
             pin_memory=True,
-            persistent_workers=False
+            persistent_workers=True
     )
 
     model = VQVAE(vqvae_config).to(device)
     wandb.watch(model)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     crit = nn.MSELoss()
+    crit = PerceptualLoss().to(device)
 
     with torch.no_grad(): model(torch.randn(1, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device), verbose=True)
 

@@ -1,4 +1,7 @@
+import PIL, numpy as np, torch
+from pathlib import Path
 from torchvision import transforms, datasets
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
 from vqvae import VQVAEConfig
 
@@ -7,7 +10,7 @@ mnist_trans = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mnist_stats[0], mnist_stats[1]),
 ])
-mnist_vqvae_config = VQVAEConfig(in_channels=1, image_sz=28, ch_base=16, ch_mult=(1,2,4,4), K=32, D=8)
+mnist_vqvae_config = VQVAEConfig(in_channels=1, image_sz=28, ch_base=16, ch_mult=(1,2), K=512, D=64)
 mnist_config = {
     'vqvae_config': mnist_vqvae_config,
     'stats': mnist_stats,
@@ -28,6 +31,62 @@ cifar10_config = {
     'fetch_train': lambda: datasets.CIFAR10(root='./data', train=True, download=True, transform=cifar10_trans),
     'fetch_test': lambda: datasets.CIFAR10(root='./data', train=False, download=True, transform=cifar10_trans),
 }
+
+bird_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+bird_trans = transforms.Compose([
+    transforms.Resize(224),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(bird_stats[0], bird_stats[1]),
+])
+bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=224, ch_base=64, ch_mult=(1,1,2,2,4), K=512, D=64)
+
+class BirdDataset(Dataset):
+    def __init__(self, path, transform=None):
+        self.path = path
+        self.transform = transform
+        self.data = []
+        for y, subdir in enumerate(Path(path).iterdir()):
+            if subdir.is_dir():
+                for img_pth in subdir.iterdir():
+                    self.data.append((str(img_pth), y))
+        print(f'Found {len(self.data)} images in {path}')
+
+    def __len__(self): return len(self.data)
+    
+    def __getitem__(self, idx):
+        img = PIL.Image.open(self.data[idx][0]).convert('RGB')
+        label = torch.tensor(self.data[idx][1])
+        if self.transform is not None: img = self.transform(img)
+        return img, label
+
+bird_dataset = BirdDataset(path='../../train', transform=bird_trans)
+
+# train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
+# train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
+
+# use Subset
+train_bird_set = Subset(bird_dataset, range(0, 5000))
+test_bird_set = Subset(bird_dataset, range(5000, 5500))
+
+
+# print(len(train_bird_set), len(test_bird_set))
+
+# train_loader = DataLoader(train_bird_set, batch_size=8, shuffle=True)
+# print(len(train_loader))
+
+# for i, (x, y) in enumerate(train_loader):
+    # print(i, x.shape, y.shape)
+# exit(0)
+
+
+bird_config = {
+    'vqvae_config': bird_vqvae_config,
+    'stats': bird_stats,
+    'fetch_train': lambda: train_bird_set,
+    'fetch_test': lambda: test_bird_set,
+}
+
 
 imagenet_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 imagenet_trans = transforms.Compose([
@@ -52,4 +111,5 @@ model_configs = {
     'mnist': mnist_config,
     'cifar10': cifar10_config,
     'imagenet': imagenet_config,
+    'bird': bird_config,
 }
