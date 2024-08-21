@@ -50,6 +50,7 @@ def plot_results(model, dataset, stats, path="vqvae.png", idxs=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
+    parser.add_argument("--loss", type=str, default="mse")
     args = parser.parse_args()
 
     run_name = f"vqvae-{args.dataset}-{time.time():.0f}"
@@ -67,7 +68,8 @@ if __name__ == "__main__":
                        "batch_size": bs, 
                        "epochs": epochs,
                        "lr": lr,
-                       "vqvae_config": vqvae_config.__dict__
+                       "vqvae_config": vqvae_config.__dict__,
+                       "loss": args.loss
                        })
 
     train_dataset, test_dataset = config["fetch_train"](), config["fetch_test"]()
@@ -100,8 +102,9 @@ if __name__ == "__main__":
     model = VQVAE(vqvae_config).to(device)
     wandb.watch(model)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
-    crit = nn.MSELoss()
-    crit = PerceptualLoss().to(device)
+
+    if args.loss == "mse": crit = nn.MSELoss()
+    elif args.loss in "perceptual": crit = PerceptualLoss().to(device)
 
     with torch.no_grad(): model(torch.randn(1, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device), verbose=True)
 

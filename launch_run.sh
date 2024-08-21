@@ -1,6 +1,9 @@
 #!/bin/sh
-#SBATCH --partition=amdgpufast
-#SBATCH --gres=gpu:4
+#SBATCH --time 23:59:00
+#SBATCH -n 8
+#SBATCH --partition=amdgpu
+#SBATCH --gres=gpu:1
+#BATCH --exclusive
 /bin/hostname
 nvidia-smi
 pwd
@@ -13,4 +16,5 @@ ml load PyTorch/2.1.0-foss-2022a-CUDA-11.7.0
 ml load Python/3.10.4-GCCcore-11.3.0
 ml load torchvision/0.16.0-foss-2022a-CUDA-11.7.0
 ml load matplotlib/3.5.2-foss-2022a
-python train_vqvae.py --dataset bird
+python -m wandb online
+python train_vqvae.py --dataset bird --loss perceptual

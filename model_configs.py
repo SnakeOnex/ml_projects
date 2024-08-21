@@ -4,6 +4,7 @@ from torchvision import transforms, datasets
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
 from vqvae import VQVAEConfig
+from utils import compute_stats
 
 mnist_stats = ([0.5], [0.5])
 mnist_trans = transforms.Compose([
@@ -37,9 +38,9 @@ bird_trans = transforms.Compose([
     transforms.Resize(224),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
-    transforms.Normalize(bird_stats[0], bird_stats[1]),
+    # transforms.Normalize(bird_stats[0], bird_stats[1]),
 ])
-bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=224, ch_base=64, ch_mult=(1,1,2,2,4), K=512, D=64)
+bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=224, ch_base=64, ch_mult=(1,1,2,4), K=512, D=128)
 
 class BirdDataset(Dataset):
     def __init__(self, path, transform=None):
@@ -60,14 +61,18 @@ class BirdDataset(Dataset):
         if self.transform is not None: img = self.transform(img)
         return img, label
 
+
 bird_dataset = BirdDataset(path='../../train', transform=bird_trans)
+
+real_stats = compute_stats(DataLoader(bird_dataset, batch_size=128, num_workers=4))
+bird_trans.transforms.append(transforms.Normalize(real_stats[0], real_stats[1]))
 
 # train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
 # train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
 
 # use Subset
-train_bird_set = Subset(bird_dataset, range(0, 5000))
-test_bird_set = Subset(bird_dataset, range(5000, 5500))
+train_bird_set = Subset(bird_dataset, range(0, 10000))
+test_bird_set = Subset(bird_dataset, range(10000, 11000))
 
 
 # print(len(train_bird_set), len(test_bird_set))
@@ -82,7 +87,7 @@ test_bird_set = Subset(bird_dataset, range(5000, 5500))
 
 bird_config = {
     'vqvae_config': bird_vqvae_config,
-    'stats': bird_stats,
+    'stats': real_stats,
     'fetch_train': lambda: train_bird_set,
     'fetch_test': lambda: test_bird_set,
 }
