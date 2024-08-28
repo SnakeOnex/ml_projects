@@ -25,7 +25,7 @@ cifar10_trans = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(cifar10_stats[0], cifar10_stats[1]),
 ])
-cifar10_vqvae_config = VQVAEConfig(in_channels=3, image_sz=32, ch_base=64, ch_mult=(1,2), K=512, D=64)
+cifar10_vqvae_config = VQVAEConfig(in_channels=3, image_sz=32, ch_base=64, ch_mult=(1,2,4), K=512, D=64)
 cifar10_config = {
     'vqvae_config': cifar10_vqvae_config,
     'stats': cifar10_stats,
@@ -33,14 +33,15 @@ cifar10_config = {
     'fetch_test': lambda: datasets.CIFAR10(root='./data', train=False, download=True, transform=cifar10_trans),
 }
 
-bird_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+# bird_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+bird_stats = ([0.1580, 0.1564, 0.1319], [0.0785, 0.0767, 0.0824])
 bird_trans = transforms.Compose([
     transforms.Resize(224),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
-    # transforms.Normalize(bird_stats[0], bird_stats[1]),
+    transforms.Normalize(bird_stats[0], bird_stats[1]),
 ])
-bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=224, ch_base=64, ch_mult=(1,1,2,4), K=512, D=128)
+bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=224, ch_base=64, ch_mult=(1,1,2,2,4), K=2048, D=64)
 
 class BirdDataset(Dataset):
     def __init__(self, path, transform=None):
@@ -64,15 +65,18 @@ class BirdDataset(Dataset):
 
 bird_dataset = BirdDataset(path='../../train', transform=bird_trans)
 
-real_stats = compute_stats(DataLoader(bird_dataset, batch_size=128, num_workers=4))
-bird_trans.transforms.append(transforms.Normalize(real_stats[0], real_stats[1]))
+# real_stats = compute_stats(DataLoader(bird_dataset, batch_size=128, num_workers=4))
+# print('Real stats:', real_stats)
+# bird_trans.transforms.append(transforms.Normalize(real_stats[0], real_stats[1]))
+# exit(0)
+
 
 # train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
 # train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
 
 # use Subset
-train_bird_set = Subset(bird_dataset, range(0, 10000))
-test_bird_set = Subset(bird_dataset, range(10000, 11000))
+train_bird_set = Subset(bird_dataset, range(0, 5000))
+test_bird_set = Subset(bird_dataset, range(5000, 6000))
 
 
 # print(len(train_bird_set), len(test_bird_set))
@@ -87,7 +91,7 @@ test_bird_set = Subset(bird_dataset, range(10000, 11000))
 
 bird_config = {
     'vqvae_config': bird_vqvae_config,
-    'stats': real_stats,
+    'stats': bird_stats,
     'fetch_train': lambda: train_bird_set,
     'fetch_test': lambda: test_bird_set,
 }

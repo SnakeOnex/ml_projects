@@ -17,7 +17,6 @@ def denormalize(x, stats):
 def compute_stats(loader):
     mean, std, count = 0, 0, 0
     for x, _ in loader:
-        print(x.shape)
         mean += torch.mean(x, dim=[0, 2, 3])
         std += torch.std(x, dim=[0, 2, 3])
         count += x[0].shape[0]

@@ -89,14 +89,13 @@ class VQVAE(nn.Module):
         self.config = config
         self.encoder = Encoder(self.config)
         self.embedding = nn.Embedding(num_embeddings=self.config.K, embedding_dim=self.config.D)
-        self.embedding.weight.data.uniform_(-1/self.config.K, 1/self.config.K)
+        # self.embedding.weight.data.uniform_(-1/self.config.K, 1/self.config.K)
         self.decoder = Decoder(self.config)
 
     def decode(self, z):
         z = torch.clamp(z, 0, self.config.K-1)
 
         quantized = self.embedding(z)
-        # print("Quantized shape:", quantized.shape)
         quantized = quantized.view(1, self.config.D, self.config.image_sz//self.config.downsample_factor, self.config.image_sz//self.config.downsample_factor)
         return self.decoder(quantized)
 
@@ -109,6 +108,9 @@ class VQVAE(nn.Module):
         B, C, H, W = enc.shape
         quant_input = enc.view(B, -1, C) # reshape to be B x -1 x C
         embed_expanded = self.embedding.weight.view(1, self.config.K, self.config.D).expand(B, self.config.K, self.config.D)
+        # print(f"mean_embedding: {embed_expanded.mean()}, std_embedding: {embed_expanded.std()}")
+        # print(f"mean_quant_input: {quant_input.mean()}, std_quant_input: {quant_input.std()}")
+        # exit(0)
         dists = torch.cdist(quant_input, embed_expanded)
         closest = torch.argmin(dists, dim=-1)
         quantized = self.embedding(closest)
@@ -120,14 +122,13 @@ class VQVAE(nn.Module):
         # losses
         commitment_loss = torch.mean((quantized.detach() - enc)**2)
         codebook_loss = torch.mean((quantized - enc.detach())**2)
-        quantize_loss = codebook_loss + 0.25 * commitment_loss
+        quantize_loss = codebook_loss + 1.0 * commitment_loss
 
         # quant_out trick to get gradients to the encoder
         quant_out = enc + (quantized - enc).detach()
         quant_out = quant_out.view(B, C, H, W)
         output = self.decoder(quant_out)
         assert output.shape == x.shape, f"Output shape {output.shape} != input shape {x.shape}"
-
 
         return {"output": output, "closest": closest, "quantize_loss": quantize_loss}
 
