@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torchvision, argparse, time, time, tqdm, PIL, wandb
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqvae import VQVAE, PerceptualLoss
+from vqvae import VQVAE, LPIPS as PerceptualLoss, VQGAN
 from model_configs import model_configs
 import matplotlib.pyplot as plt
 from utils import get_free_gpu, denormalize
@@ -17,7 +17,8 @@ def eval_vqvae(model, loader):
             out  = model(x)
 
             mse_loss = mse_loss_fn(out["output"], x)
-            perceptual_loss = perceptual_loss_fn(out["output"], x)
+            perceptual_loss = perceptual_loss_fn(out["output"], x).mean()
+            mse_loss = nn.L1Loss()(out["output"], x)
             quantize_loss = out["quantize_loss"]
 
             val_l += mse_loss + perceptual_loss + quantize_loss
@@ -65,7 +66,7 @@ if __name__ == "__main__":
 
     config = model_configs[args.dataset]
     vqvae_config = config["vqvae_config"]
-    bs, lr, epochs = 64, 1e-4, 1000
+    bs, lr, epochs = 16, 1e-4, 1000
 
     wandb.init(project="vqvae",
                name=run_name,
@@ -106,13 +107,17 @@ if __name__ == "__main__":
     )
 
     model = VQVAE(vqvae_config).to(device)
-    wandb.watch(model)
+    # model = VQGAN(vqvae_config).to(device)
+    # wandb.watch(model)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
 
-    mse_loss_fn = nn.MSELoss()
+    mse_loss_fn = nn.L1Loss()
+
     perceptual_loss_fn = PerceptualLoss().to(device)
 
-    with torch.no_grad(): model(torch.randn(1, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device), verbose=True)
+    print(torch.randn(8, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).shape)
+
+    with torch.no_grad(): model(torch.randn(8, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device))
 
     best_loss = float("inf")
     best_model = None
@@ -125,10 +130,16 @@ if __name__ == "__main__":
             optim.zero_grad()
             out = model(x)
 
-            perceptual_loss = perceptual_loss_fn(out["output"], x)
-            mse_loss = mse_loss_fn(out["output"], x)
+            # perceptual_loss = perceptual_loss_fn(out["output"], x)
+            # mse_loss = mse_loss_fn(out["output"], x)
+            # quantize_loss = out["quantize_loss"]
+            # train_loss = perceptual_loss + mse_loss + quantize_loss
+
+            # perceptual_loss, loss_items = perceptual_loss_fn(out["output"], x)
+            perceptual_loss = perceptual_loss_fn(out["output"].clamp(-1.0, 1.0), x).mean()
             quantize_loss = out["quantize_loss"]
-            train_loss = perceptual_loss + mse_loss + quantize_loss
+            mse_loss = mse_loss_fn(out["output"], x)
+            train_loss = mse_loss + perceptual_loss + quantize_loss
 
             trn_l += train_loss; mse_l += mse_loss; percept_l += perceptual_loss; q_l += quantize_loss; cnt += 1
             util.update(out["closest"].view(-1).cpu().detach().numpy().tolist())
@@ -148,7 +159,8 @@ if __name__ == "__main__":
 
         if epoch % 10 == 0:
             plot_results(model, test_dataset, config["stats"], path=run_folder / f"{args.dataset}_{epoch}.png", idxs=idxs)
-            wandb.save(run_folder / f"{args.dataset}_{epoch}.png")
+            # wandb.save(run_folder / f"{args.dataset}_{epoch}.png")
+            wandb.log({"reconstruction": [wandb.Image(str(run_folder / f"{args.dataset}_{epoch}.png"))]})
 
         if val_l < best_loss:
             best_loss = val_l

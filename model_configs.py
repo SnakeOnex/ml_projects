@@ -1,6 +1,8 @@
 import PIL, numpy as np, torch
 from pathlib import Path
 from torchvision import transforms, datasets
+from torchvision.transforms import v2
+from torchvision.io import read_image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
 from vqvae import VQVAEConfig
@@ -36,12 +38,16 @@ cifar10_config = {
 # bird_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 bird_stats = ([0.1580, 0.1564, 0.1319], [0.0785, 0.0767, 0.0824])
 bird_trans = transforms.Compose([
-    transforms.Resize(224),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(bird_stats[0], bird_stats[1]),
+    # transforms.Resize(256),
+    # transforms.CenterCrop(256),
+    # transforms.ToTensor(),
+    # transforms.Normalize(bird_stats[0], bird_stats[1]),
+    v2.Resize(256),
+    v2.CenterCrop(256),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(mean=bird_stats[0], std=bird_stats[1]),
 ])
-bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=224, ch_base=64, ch_mult=(1,1,2,2,4), K=2048, D=64)
+bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=256, ch_base=64, ch_mult=(1,1,2,2,4), K=2048, D=64)
 
 class BirdDataset(Dataset):
     def __init__(self, path, transform=None):
@@ -57,7 +63,8 @@ class BirdDataset(Dataset):
     def __len__(self): return len(self.data)
     
     def __getitem__(self, idx):
-        img = PIL.Image.open(self.data[idx][0]).convert('RGB')
+        # img = PIL.Image.open(self.data[idx][0]).convert('RGB')
+        img = read_image(self.data[idx][0])
         label = torch.tensor(self.data[idx][1])
         if self.transform is not None: img = self.transform(img)
         return img, label
