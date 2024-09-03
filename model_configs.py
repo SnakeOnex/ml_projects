@@ -5,7 +5,7 @@ from torchvision.transforms import v2
 from torchvision.io import read_image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
-from vqvae import VQVAEConfig
+from vqgan import VQGANConfig as VQVAEConfig
 from utils import compute_stats
 
 mnist_stats = ([0.5], [0.5])
@@ -47,7 +47,7 @@ bird_trans = transforms.Compose([
     v2.ToDtype(torch.float32, scale=True),
     v2.Normalize(mean=bird_stats[0], std=bird_stats[1]),
 ])
-bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=256, ch_base=64, ch_mult=(1,1,2,2,4), K=2048, D=64)
+bird_vqvae_config = VQVAEConfig(in_channels=3, image_sz=256, ch_base=64, ch_mult=(1,1,2,2,4), K=2048, D=256)
 
 class BirdDataset(Dataset):
     def __init__(self, path, transform=None):
@@ -79,11 +79,13 @@ bird_dataset = BirdDataset(path='../../train', transform=bird_trans)
 
 
 # train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
-# train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
+train_set_sz = int(len(bird_dataset)*0.9)
+test_set_sz = len(bird_dataset) - train_set_sz
+train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [train_set_sz, test_set_sz])
 
 # use Subset
-train_bird_set = Subset(bird_dataset, range(0, 5000))
-test_bird_set = Subset(bird_dataset, range(5000, 6000))
+# train_bird_set = Subset(bird_dataset, range(0, 20000))
+# test_bird_set = Subset(bird_dataset, range(20000, 22000))
 
 
 # print(len(train_bird_set), len(test_bird_set))

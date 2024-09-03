@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torchvision, argparse, time, time, tqdm, PIL, wandb
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqvae import VQVAE, LPIPS as PerceptualLoss, VQGAN
+from vqvae import VQVAE 
 from model_configs import model_configs
 import matplotlib.pyplot as plt
 from utils import get_free_gpu, denormalize
@@ -11,23 +11,20 @@ print("selected device: ", device)
 
 def eval_vqvae(model, loader):
     with torch.no_grad():
-        val_l, mse_l, percept_l, q_l, cnt = 0, 0, 0, 0, 0
+        val_l, mse_l, q_l, cnt = 0, 0, 0, 0
         for x, _ in loader:
             x = x.to(device)
-            out  = model(x)
+            out = model(x)
 
-            mse_loss = mse_loss_fn(out["output"], x)
-            perceptual_loss = perceptual_loss_fn(out["output"], x).mean()
-            mse_loss = nn.L1Loss()(out["output"], x)
+            mse_loss = nn.MSELoss()(out["output"], x)
             quantize_loss = out["quantize_loss"]
 
-            val_l += mse_loss + perceptual_loss + quantize_loss
+            val_l += mse_loss + quantize_loss
             mse_l += mse_loss
-            percept_l += perceptual_loss
             q_l += quantize_loss
             cnt += 1
 
-    return {"valid_loss": val_l/cnt, "valid_mse_loss": mse_l/cnt, "valid_perceptual_loss": percept_l/cnt, "valid_quantize_loss": q_l/cnt}
+    return {"valid_loss": val_l/cnt, "valid_mse_loss": mse_l/cnt, "valid_quantize_loss": q_l/cnt}
 
 def plot_results(model, dataset, stats, path="vqvae.png", idxs=None):
     if idxs is None:
@@ -111,11 +108,7 @@ if __name__ == "__main__":
     # wandb.watch(model)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
 
-    mse_loss_fn = nn.L1Loss()
-
-    perceptual_loss_fn = PerceptualLoss().to(device)
-
-    print(torch.randn(8, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).shape)
+    mse_loss_fn = nn.MSELoss()
 
     with torch.no_grad(): model(torch.randn(8, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device))
 
@@ -123,36 +116,28 @@ if __name__ == "__main__":
     best_model = None
 
     for epoch in range(epochs):
-        trn_l, mse_l, percept_l, q_l, cnt, util = 0, 0, 0, 0, 0, set()
+        trn_l, mse_l, q_l, cnt, util = 0, 0, 0, 0, set()
         st = time.time()
         for x, _ in tqdm.tqdm(train_loader):
             x = x.to(device)
             optim.zero_grad()
             out = model(x)
 
-            # perceptual_loss = perceptual_loss_fn(out["output"], x)
-            # mse_loss = mse_loss_fn(out["output"], x)
-            # quantize_loss = out["quantize_loss"]
-            # train_loss = perceptual_loss + mse_loss + quantize_loss
-
-            # perceptual_loss, loss_items = perceptual_loss_fn(out["output"], x)
-            perceptual_loss = perceptual_loss_fn(out["output"].clamp(-1.0, 1.0), x).mean()
             quantize_loss = out["quantize_loss"]
             mse_loss = mse_loss_fn(out["output"], x)
-            train_loss = mse_loss + perceptual_loss + quantize_loss
+            train_loss = mse_loss + quantize_loss
 
-            trn_l += train_loss; mse_l += mse_loss; percept_l += perceptual_loss; q_l += quantize_loss; cnt += 1
+            trn_l += train_loss; mse_l += mse_loss; q_l += quantize_loss; cnt += 1
             util.update(out["closest"].view(-1).cpu().detach().numpy().tolist())
 
             train_loss.backward()
             optim.step()
-        trn_l /= cnt; mse_l /= cnt; percept_l /= cnt; q_l /= cnt
+        trn_l /= cnt; mse_l /= cnt; q_l /= cnt
 
         val_res = eval_vqvae(model, test_loader)
-        val_l, val_mse_l, val_percept_l, val_q_l = val_res["valid_loss"], val_res["valid_mse_loss"], val_res["valid_perceptual_loss"], val_res["valid_quantize_loss"]
+        val_l, val_mse_l, val_q_l = val_res["valid_loss"], val_res["valid_mse_loss"], val_res["valid_quantize_loss"]
         wandb.log({"train_loss": trn_l,
                    "train_mse_loss": mse_l,
-                   "train_perceptual_loss": percept_l,
                    "train_quantize_loss": q_l,
                    **val_res,
                    "util": len(util)/vqvae_config.K,})
@@ -167,7 +152,7 @@ if __name__ == "__main__":
             torch.save(model.state_dict(), run_folder / f"{args.dataset}_best.pth")
 
         # print(f"e={epoch:2}, trn_r_l={r_loss:.4f}, val_r_l={val_r_loss:.4f}, trn_q_l={q_loss:.4f}, val_q_l={val_q_loss:.4f}, t={(time.time() - st):.2f} s")
-        print(f"e={epoch:2}, trn_l={trn_l:.4f} val_l={val_l:.4f}, trn_mse_l={mse_l:.4f}, val_mse_l={val_mse_l:.4f}, trn_percept_l={percept_l:.4f}, val_percept_l={val_percept_l:.4f}, trn_q_l={q_l:.4f}, val_q_l={val_q_l:.4f}, util={len(util)/vqvae_config.K:.2f}")
+        print(f"e={epoch:2}, trn_l={trn_l:.4f} val_l={val_l:.4f}, trn_mse_l={mse_l:.4f}, val_mse_l={val_mse_l:.4f}, trn_q_l={q_l:.4f}, val_q_l={val_q_l:.4f}, util={len(util)/vqvae_config.K:.2f}")
 
     model.load_state_dict(torch.load(run_folder / f"{args.dataset}_best.pth"))
     plot_results(model, test_dataset, config["stats"], path=f"{args.dataset}_random_sample.png")
