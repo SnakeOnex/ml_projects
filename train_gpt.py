@@ -2,7 +2,7 @@ import argparse, time, time, tqdm, PIL, wandb, numpy as np, pickle
 import torch, torch.nn as nn, torchvision
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqvae import VQVAE
+from vqgan import VQGAN
 from model_configs import model_configs
 from gpt import GPTLanguageModel
 from utils import get_free_gpu, denormalize
@@ -12,20 +12,21 @@ device = torch.device(get_free_gpu())
 print("selected device: ", device)
 
 def generate_sample(path, stats):
+    gpt.eval()
     images = torch.zeros((0,C,SZ,SZ)).to(device)
-    for _ in range(16):
-        context = torch.zeros((1, 1), dtype=torch.long, device=device)
-        idx = torch.randint(0, tokens.shape[0], (1,))
-        context[0, 0] = tokens[idx,0]
-        # print(context[0, 0])
 
-        res = gpt.generate(context, IMAGE_TOKENS-1)
-        res = res[:,1:]
-        img = model.decode(res)
+    # context = torch.zeros((16, 1), dtype=torch.long, device=device)
+    # idx = torch.randint(0, tokens.shape[0], (1,))
+    idx = torch.ones((16,1), dtype=torch.long, device=device)*K
+    # context[:, 0] = idx
+    context = idx
 
-        img = denormalize(img, stats)
+    res = gpt.generate(context, IMAGE_TOKENS-1)
 
-        images = torch.cat([images, img], dim=0)
+    res = res[:,1:]
+    res[res >= K] = K-1
+    imgs = model.decode(res)
+    images = denormalize(imgs, stats)
 
     grid_pred = torchvision.utils.make_grid(images, nrow=4)
     grid_final = grid_pred.permute(1, 2, 0)
@@ -34,6 +35,7 @@ def generate_sample(path, stats):
     grid_final = (grid_final * 255).astype("uint8")
     grid_final = PIL.Image.fromarray(grid_final)
     grid_final.save(path)
+    gpt.train()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -57,7 +59,7 @@ if __name__ == "__main__":
     # IMAGE_TOKENS = (SZ//CONVS)**2+1
     IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
     block_size = IMAGE_TOKENS-1
-    batch_size = 128
+    batch_size = 16
     eval_iters = 10
     eval_interval = 100
     max_iters = 500000
@@ -66,10 +68,10 @@ if __name__ == "__main__":
 
     gpt_config = {
         "block_size": block_size,
-        "vocab_size": K+10,
-        "n_embd": 1024,
-        "n_head": 12,
-        "n_layer": 12,
+        "vocab_size": K+1,
+        "n_embd": 768,
+        "n_head": 10,
+        "n_layer": 10,
     }
 
     wandb.init(project="gpt-vqvae",
@@ -89,7 +91,7 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(
             train_dataset, 
-            batch_size=128, 
+            batch_size=8, 
             shuffle=False,
             num_workers=8, 
             prefetch_factor=4, 
@@ -98,7 +100,7 @@ if __name__ == "__main__":
     )
     test_loader = DataLoader(
             test_dataset, 
-            batch_size=128, 
+            batch_size=8, 
             shuffle=False, 
             num_workers=8, 
             prefetch_factor=4, 
@@ -106,26 +108,71 @@ if __name__ == "__main__":
             persistent_workers=False
     )
 
-    model = VQVAE(vqvae_config).to(device)
-    model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
+    model = VQGAN(vqvae_config).to(device)
+    # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
+    model.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725276726/bird_best.pth", map_location=device))
+    model.eval()
+
+    gpt = GPTLanguageModel(**gpt_config).to(device)
+    params = sum(p.numel() for p in gpt.parameters())
+    print(f"number of parameters: {params / 1_000_000:.1f}M")
+    gpt.train()
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-    for x, y in tqdm.tqdm(test_loader):
-        x, y = x.to(device), y.to(device)
-        quantized = model(x)["closest"]
-        quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-        tokens = torch.cat([tokens, quantized], dim=0)
+    optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
 
-    # for x, _ in tqdm.tqdm(train_loader):
-        # x = x.to(device)
-        # quantized = model(x)["closest"]
-        # tokens = torch.cat([tokens, quantized], dim=0)
+    # for x, y in tqdm.tqdm(test_loader):
 
-    for x, y in tqdm.tqdm(train_loader):
-        x, y = x.to(device), y.to(device)
-        quantized = model(x)["closest"]
-        quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-        tokens = torch.cat([tokens, quantized], dim=0)
+    # do the same for loop but instatiate the loading bar
+
+    for epoch in range(10):
+        bar = tqdm.tqdm(train_loader)
+
+        for i, (x, y) in enumerate(bar):
+            x, y = x.to(device), y.to(device)
+            _, quantized, _ = model(x)
+
+            quantized = quantized.view(x.shape[0], -1)
+            # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
+            quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
+
+            tokens_x = quantized[:,:block_size]
+            tokens_y = quantized[:,1:block_size+1]
+
+            tokens, loss = gpt(tokens_x, tokens_y)
+            bar.set_description(f"loss: {loss.item():.4f}")
+            wandb.log({"loss": loss.item()})
+
+            loss.backward()
+            optim.step()
+            optim.zero_grad()
+
+            if i % 1000 == 0:
+                generate_sample(run_folder / f"{epoch}.png", config["stats"])
+                wandb.log({"gen_sample": [wandb.Image(str(run_folder / f"{epoch}.png"))]})
+
+        bar = tqdm.tqdm(test_loader)
+        val_loss, count = 0, 0
+        with torch.no_grad():
+            for i, (x, y) in enumerate(bar):
+                x, y = x.to(device), y.to(device)
+                _, quantized, _ = model(x)
+
+                quantized = quantized.view(x.shape[0], -1)
+                # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
+                quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
+
+                tokens_x = quantized[:,:block_size]
+                tokens_y = quantized[:,1:block_size+1]
+
+                tokens, loss = gpt(tokens_x, tokens_y)
+                val_loss += loss.item(); count += 1
+
+                bar.set_description(f"loss: {loss.item():.4f}")
+        print("val_loss=", val_loss/count)
+
+        # log val loss with epoch on x axis
+        wandb.log({"val_loss": val_loss/count, "epoch": epoch})
 
     # tokens = tokens[torch.randperm(tokens.shape[0])]
     tokens = tokens.to(torch.device("cpu"))
@@ -135,11 +182,6 @@ if __name__ == "__main__":
     print("tokens_count: ", tokens.view(-1).shape[0])
 
 
-    gpt = GPTLanguageModel(**gpt_config).to(device)
-    params = sum(p.numel() for p in gpt.parameters())
-    print(f"number of parameters: {params / 1_000_000:.1f}M")
-    wandb.watch(gpt)
-    gpt.train()
 
     class TokenDataset(torch.utils.data.Dataset):
         def __init__(self, tokens):
@@ -164,7 +206,7 @@ if __name__ == "__main__":
         val_tokens_np.tofile(run_folder / "val.bin")
         meta = {"vocab_size": K+10, "block_size": block_size}
         with open(run_folder / "meta.pkl", "wb") as f: pickle.dump(meta, f)
-        exit(0)
+        # exit(0)
 
     train_dataset = TokenDataset(train_tokens)
     val_dataset = TokenDataset(val_tokens)

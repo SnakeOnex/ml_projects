@@ -120,6 +120,7 @@ class GPTLanguageModel(nn.Module):
 
         pos_emb = self.position_embedding_table(torch.arange(T, device=self.position_embedding_table.weight.device))
         x = tok_emb + pos_emb # (B,T,C)
+
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
@@ -129,14 +130,14 @@ class GPTLanguageModel(nn.Module):
         else:
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
+            targets = targets.reshape(B*T)
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the current context
-        for _ in range(max_new_tokens):
+        for i in range(max_new_tokens):
             # crop idx to the last block_size tokens
             idx_cond = idx[:, -self.block_size:]
             # get the predictions
