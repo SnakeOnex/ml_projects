@@ -151,3 +151,32 @@ class GPTLanguageModel(nn.Module):
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
+
+    def generate_maskgit(self, init):
+        self.eval()
+        with torch.no_grad():
+            logits, _ = self(init)
+            # print("logits: ", logits.shape)
+            probs = F.softmax(logits, dim=-1)
+            # print("probs: ", probs.shape)
+
+            B, T, C = probs.shape
+            probs_vec = probs.view(B, -1)
+            # print("probs_vec: ", probs_vec.shape)
+
+            samples_vec = torch.ones((B, T), device=probs.device, dtype=torch.int64)
+
+            for i in range(B):
+                samples_vec[i, :] = torch.multinomial(probs_vec[i, :], num_samples=1)
+
+            # samples_vec = torch.multinomial(probs_vec, num_samples=1)
+            # print("samples_vec: ", samples_vec.shape)
+
+            samples = samples_vec.view(B, T)
+            # print("samples: ", samples.shape)
+        self.train()
+
+        return samples
+
+
+
