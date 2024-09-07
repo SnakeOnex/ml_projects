@@ -59,7 +59,8 @@ if __name__ == "__main__":
     # IMAGE_TOKENS = (SZ//CONVS)**2+1
     IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
     block_size = IMAGE_TOKENS-1
-    batch_size = 16
+    batch_size = 8
+    p_keep = 0.5
     eval_iters = 10
     eval_interval = 100
     max_iters = 500000
@@ -69,8 +70,8 @@ if __name__ == "__main__":
     gpt_config = {
         "block_size": block_size,
         "vocab_size": K+1,
-        "n_embd": 768,
-        "n_head": 10,
+        "n_embd": 1024,
+        "n_head": 16,
         "n_layer": 10,
     }
 
@@ -80,6 +81,7 @@ if __name__ == "__main__":
                        "batch_size": batch_size, 
                        "max_iters": max_iters,
                        "lr": args.lr,
+                       "p_keep": p_keep,
                        "K": K,
                        "SZ": SZ,
                        "C": C,
@@ -91,26 +93,26 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(
             train_dataset, 
-            batch_size=8, 
+            batch_size=batch_size, 
             shuffle=False,
-            num_workers=8, 
+            num_workers=2, 
             prefetch_factor=4, 
             pin_memory=True,
-            persistent_workers=False
+            persistent_workers=True
     )
     test_loader = DataLoader(
             test_dataset, 
-            batch_size=8, 
+            batch_size=batch_size, 
             shuffle=False, 
-            num_workers=8, 
+            num_workers=2, 
             prefetch_factor=4, 
             pin_memory=True,
-            persistent_workers=False
+            persistent_workers=True
     )
 
     model = VQGAN(vqvae_config).to(device)
     # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
-    model.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725276726/bird_best.pth", map_location=device))
+    model.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
     model.eval()
 
     gpt = GPTLanguageModel(**gpt_config).to(device)
@@ -119,33 +121,74 @@ if __name__ == "__main__":
     gpt.train()
 
     tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-    optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
+
+    decay, no_decay = set(), set()
+    whitelist_weight_modules = (nn.Linear, )
+    blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
+
+    # for mn, m in gpt.transformer.named_modules():
+    for mn, m in gpt.named_modules():
+        for pn, p in m.named_parameters():
+            fpn = f"{mn}.{pn}" if mn else pn
+
+            if pn.endswith("bias"):
+                no_decay.add(fpn)
+
+            elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
+                decay.add(fpn)
+
+            elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
+                no_decay.add(fpn)
+
+    no_decay.add("position_embedding_table.weight")
+
+    param_dict = {pn: p for pn, p in gpt.named_parameters()}
+
+    optim_groups = [
+        {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": 0.01},
+        {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
+    ]
+
+    # optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
+    amp_enabled = False
+    optim = torch.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9,0.95))
+    scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
     # for x, y in tqdm.tqdm(test_loader):
 
     # do the same for loop but instatiate the loading bar
 
-    for epoch in range(10):
+    for epoch in range(1000):
         bar = tqdm.tqdm(train_loader)
 
         for i, (x, y) in enumerate(bar):
             x, y = x.to(device), y.to(device)
-            _, quantized, _ = model(x)
 
-            quantized = quantized.view(x.shape[0], -1)
-            # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-            quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=amp_enabled):
+                _, quantized, _ = model(x)
 
-            tokens_x = quantized[:,:block_size]
-            tokens_y = quantized[:,1:block_size+1]
+                quantized = quantized.view(x.shape[0], -1)
+                # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
+                quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
 
-            tokens, loss = gpt(tokens_x, tokens_y)
-            bar.set_description(f"loss: {loss.item():.4f}")
-            wandb.log({"loss": loss.item()})
+                tokens_x = quantized[:,:block_size]
+                tokens_y = quantized[:,1:block_size+1]
 
-            loss.backward()
-            optim.step()
-            optim.zero_grad()
+                mask = torch.bernoulli(p_keep * torch.ones(tokens_x.shape, device=device)).to(dtype=torch.int64)
+                random_indices = torch.randint_like(tokens_x, gpt_config["vocab_size"])
+                tokens_x = mask * tokens_x + (1 - mask) * random_indices
+
+                tokens, loss = gpt(tokens_x, tokens_y)
+                bar.set_description(f"loss: {loss.item():.4f}")
+                wandb.log({"loss": loss.item()})
+
+                # scaler.scale(loss).backward()
+                # scaler.step(optim)
+                # scaler.update()
+
+                loss.backward()
+                optim.step()
+                optim.zero_grad()
 
             if i % 1000 == 0:
                 generate_sample(run_folder / f"{epoch}.png", config["stats"])
@@ -170,100 +213,4 @@ if __name__ == "__main__":
 
                 bar.set_description(f"loss: {loss.item():.4f}")
         print("val_loss=", val_loss/count)
-
-        # log val loss with epoch on x axis
         wandb.log({"val_loss": val_loss/count, "epoch": epoch})
-
-    # tokens = tokens[torch.randperm(tokens.shape[0])]
-    tokens = tokens.to(torch.device("cpu"))
-
-
-    print("tokens shape: ", tokens.shape)
-    print("tokens_count: ", tokens.view(-1).shape[0])
-
-
-
-    class TokenDataset(torch.utils.data.Dataset):
-        def __init__(self, tokens):
-            self.tokens = tokens
-            self.block_size = block_size
-
-        def __len__(self):
-            return self.tokens.shape[0]
-
-        def __getitem__(self, idx):
-            return self.tokens[idx, :self.block_size], self.tokens[idx, 1:self.block_size+1]
-
-    optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
-
-    split = int(0.8 * len(tokens))
-    train_tokens, val_tokens = tokens[:split], tokens[split:]
-
-    if args.save_tokens:
-        train_tokens_np = train_tokens.to(torch.device("cpu")).numpy().astype("uint16")
-        val_tokens_np = val_tokens.to(torch.device("cpu")).numpy().astype("uint16")
-        train_tokens_np.tofile(run_folder / "train.bin")
-        val_tokens_np.tofile(run_folder / "val.bin")
-        meta = {"vocab_size": K+10, "block_size": block_size}
-        with open(run_folder / "meta.pkl", "wb") as f: pickle.dump(meta, f)
-        # exit(0)
-
-    train_dataset = TokenDataset(train_tokens)
-    val_dataset = TokenDataset(val_tokens)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=4, persistent_workers=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=4, persistent_workers=False)
-
-    @torch.no_grad()
-    def eval():
-        losses = []
-        for xb, yb in val_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            _, loss = gpt(xb, yb)
-            losses.append(loss.item())
-        return torch.tensor(losses).mean().item()
-
-    Path("gens").mkdir(exist_ok=True)
-
-    best_val_loss = float('inf')
-
-    for iter in range(max_iters):
-
-        bar = tqdm.tqdm(range(len(train_loader)), position=0)
-        start_time = time.time()
-        train_losses = []
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-
-            _, loss = gpt(xb, yb)
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-            train_losses.append(loss.item())
-
-            full_time = time.time() - start_time
-            start_time = time.time()
-
-            bar.set_description(f"loss: {loss.item():.4f} time: {full_time:.2f}s, fps={1/full_time:.2f}")
-            bar.update(1)
-
-        valid_losses = []
-        for xb, yb in val_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            with torch.no_grad():
-                _, loss = gpt(xb, yb)
-            valid_losses.append(loss.item())
-
-        valid_loss = torch.tensor(valid_losses).mean().item()
-        train_loss = torch.tensor(train_losses).mean().item()
-        wandb.log({"train_loss": train_loss, "valid_loss": valid_loss})
-
-        if valid_loss < best_val_loss:
-            best_val_loss = valid_loss
-            torch.save(gpt.state_dict(), run_folder / f"{args.dataset}_gpt.pth")
-        print(f"{iter=}, {train_loss=:.3f}, {valid_loss=:.3f}")
-        generate_sample(run_folder / f"{iter}.png", config["stats"])
-
-        if iter % 5 == 0:
-            wandb.save(run_folder / f"{iter}.png")
-
-    torch.save(gpt.state_dict(), f"checkpoints/{args.dataset}_gpt.pth")

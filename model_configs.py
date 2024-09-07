@@ -35,13 +35,8 @@ cifar10_config = {
     'fetch_test': lambda: datasets.CIFAR10(root='./data', train=False, download=True, transform=cifar10_trans),
 }
 
-# bird_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 bird_stats = ([0.1580, 0.1564, 0.1319], [0.0785, 0.0767, 0.0824])
 bird_trans = transforms.Compose([
-    # transforms.Resize(256),
-    # transforms.CenterCrop(256),
-    # transforms.ToTensor(),
-    # transforms.Normalize(bird_stats[0], bird_stats[1]),
     v2.Resize(256),
     v2.CenterCrop(256),
     v2.ToDtype(torch.float32, scale=True),
@@ -72,13 +67,8 @@ class BirdDataset(Dataset):
 
 bird_dataset = BirdDataset(path='../../train', transform=bird_trans)
 
-# real_stats = compute_stats(DataLoader(bird_dataset, batch_size=128, num_workers=4))
-# print('Real stats:', real_stats)
-# bird_trans.transforms.append(transforms.Normalize(real_stats[0], real_stats[1]))
-# exit(0)
-
-
 # train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [int(len(bird_dataset)*0.8), int(len(bird_dataset)-len(bird_dataset)*0.8)])
+# bird_dataset = Subset(bird_dataset, range(0, 10000))
 train_set_sz = int(len(bird_dataset)*0.9)
 test_set_sz = len(bird_dataset) - train_set_sz
 train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [train_set_sz, test_set_sz])
@@ -87,24 +77,12 @@ train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [tra
 # train_bird_set = Subset(bird_dataset, range(0, 20000))
 # test_bird_set = Subset(bird_dataset, range(20000, 22000))
 
-
-# print(len(train_bird_set), len(test_bird_set))
-
-# train_loader = DataLoader(train_bird_set, batch_size=8, shuffle=True)
-# print(len(train_loader))
-
-# for i, (x, y) in enumerate(train_loader):
-    # print(i, x.shape, y.shape)
-# exit(0)
-
-
 bird_config = {
     'vqvae_config': bird_vqvae_config,
     'stats': bird_stats,
     'fetch_train': lambda: train_bird_set,
     'fetch_test': lambda: test_bird_set,
 }
-
 
 imagenet_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 imagenet_trans = transforms.Compose([
@@ -131,3 +109,4 @@ model_configs = {
     'imagenet': imagenet_config,
     'bird': bird_config,
 }
+
