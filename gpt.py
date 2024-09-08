@@ -28,7 +28,7 @@ class Head(nn.Module):
         q = self.query(x) # (B,T,hs)
         # compute attention scores ("affinities")
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        # wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
         wei = F.softmax(wei, dim=-1) # (B, T, T)
         wei = self.dropout(wei)
         # perform the weighted aggregation of the values
@@ -152,31 +152,49 @@ class GPTLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-    def generate_maskgit(self, init):
+    def generate_maskgit(self, init, steps=1):
         self.eval()
+
+        mask = torch.zeros_like(init).bool()
+        output = torch.zeros_like(init)+init
         with torch.no_grad():
-            logits, _ = self(init)
-            # print("logits: ", logits.shape)
-            probs = F.softmax(logits, dim=-1)
-            # print("probs: ", probs.shape)
+            for step in range(steps):
+                print("pre: ", torch.sum(mask[0,:]))
+                logits, _ = self(output)
+                probs = F.softmax(logits, dim=-1)
 
-            B, T, C = probs.shape
-            probs_vec = probs.view(B, -1)
-            # print("probs_vec: ", probs_vec.shape)
+                B, T, C = probs.shape
 
-            samples_vec = torch.ones((B, T), device=probs.device, dtype=torch.int64)
+                samples_vec = torch.ones((B, T), device=probs.device, dtype=torch.int64)
 
-            for i in range(B):
-                samples_vec[i, :] = torch.multinomial(probs_vec[i, :], num_samples=1)
 
-            # samples_vec = torch.multinomial(probs_vec, num_samples=1)
-            # print("samples_vec: ", samples_vec.shape)
+                def gamma_func(r):
+                    return 256 // r
 
-            samples = samples_vec.view(B, T)
-            # print("samples: ", samples.shape)
+                # we have a [B, 256, 2048] tensor of probabilities
+                # then we get [B, 256] tensor of sampled indices
+                # we want to then get the [B, 256] tensor of probabilities for those indices
+
+                for i in range(B):
+                    samples_vec[i, :] = torch.multinomial(probs[i, :], num_samples=1).view(-1)
+
+                sampled_probs = probs[torch.arange(B).view(-1, 1), torch.arange(T).view(1, -1), samples_vec]
+                print("sampled_probs: ", sampled_probs.shape)
+                print(sampled_probs[0, :10])
+
+                sampled_probs[mask] = 0. # mask out the already sampled tokens
+                sorted_probs = torch.argsort(sampled_probs, dim=-1, descending=True)
+
+                print("highest probs: ", sampled_probs[0, sorted_probs[0, :10]])
+
+                # unmask the top gamma_func(steps) tokens (for each example in the batch)
+                top_k = sorted_probs[:, :gamma_func(steps)]
+                mask[torch.arange(B).view(-1, 1), top_k] = 1
+                output[torch.arange(B).view(-1, 1), top_k] = samples_vec[torch.arange(B).view(-1, 1), top_k]
+                print("post: ", torch.sum(mask[0,:]))
         self.train()
 
-        return samples
+        return output
 
 
 

@@ -22,12 +22,15 @@ def generate_sample(path, stats):
     context = idx
 
     context = torch.ones((16,256), dtype=torch.long, device=device)*K
-    res = gpt.generate_maskgit(context)
+    res = gpt.generate_maskgit(context, steps=8)
     # print("res: ", res.shape)
     # exit(0)
 
     # res = res[:,1:]
+    print(f"{res.min()=}, {res.max()=}, {res.float().mean()=}")
     res[res >= K] = K-1
+    print(f"{res.min()=}, {res.max()=}, {res.float().mean()=}")
+    # exit(0)
     imgs = model.decode(res)
     images = denormalize(imgs, stats)
 
@@ -43,7 +46,7 @@ def generate_sample(path, stats):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--save_tokens", action="store_true")
     args = parser.parse_args()
 
@@ -170,9 +173,9 @@ if __name__ == "__main__":
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=amp_enabled):
                 _, quantized, _ = model(x)
 
-
-
                 quantized = quantized.view(x.shape[0], -1)
+
+                B, T = quantized.shape
                 # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
                 # quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
                 # print(quantized.shape)
@@ -182,9 +185,16 @@ if __name__ == "__main__":
                 # tokens_x = quantized[:,:block_size]
                 # tokens_y = quantized[:,1:block_size+1]
 
-                # sample a p_keep fraction of the tokens between (0, 1)
-                p_keep = torch.rand(1).item()
+                # p_mask = torch.randint(0, 8, (B,1), device=device) * 32
+                # mask = torch.zeros((B, T), device=device).to(dtype=torch.int64)
 
+                # for b in range(B):
+                    # indices = torch.randperm(T, device=device)[:p_mask[b]]
+                    # mask[b, indices] = 1
+                    # print(torch.sum(mask[b,:]).item())
+                # tokens_x = mask * quantized + (1 - mask) * K
+
+                p_keep = torch.rand((B,1), device=device)
                 mask = torch.bernoulli(p_keep * torch.ones(quantized.shape, device=device)).to(dtype=torch.int64)
                 masked_input = torch.zeros_like(quantized)+K
                 tokens_x = mask * quantized + (1 - mask) * masked_input
@@ -231,7 +241,7 @@ if __name__ == "__main__":
                 optim.step()
                 optim.zero_grad()
 
-            if i % 100 == 0:
+            if i % 1000 == 0:
                 generate_sample(run_folder / f"{epoch}.png", config["stats"])
                 wandb.log({"gen_sample": [wandb.Image(str(run_folder / f"{epoch}.png"))]})
 
