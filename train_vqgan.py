@@ -11,7 +11,7 @@ device = torch.device(get_free_gpu())
 print("selected device: ", device)
 
 @torch.no_grad()
-def eval_vqvae(model, loader):
+def eval_vqgan(model, loader):
     with torch.no_grad():
         val_l, q_l, recon_l, cnt = 0, 0, 0, 0
         for x, _ in loader:
@@ -30,7 +30,7 @@ def eval_vqvae(model, loader):
     return {"valid/loss": val_l/cnt, "valid/quantize_loss": q_l/cnt, "valid/recon_loss": recon_l/cnt}
 
 @torch.no_grad()
-def plot_results(model, dataset, stats, path="vqvae.jpg", idxs=None):
+def plot_results(model, dataset, path, idxs=None):
     if idxs is None:
         idxs = torch.randint(0, len(dataset), (16,))
 
@@ -41,8 +41,8 @@ def plot_results(model, dataset, stats, path="vqvae.jpg", idxs=None):
         images_pred, _, _ = model(images_gt.to(device))
     images_pred = images_pred.cpu().detach()
 
-    images_gt = denormalize(images_gt, stats)
-    images_pred = denormalize(images_pred, stats)
+    images_gt = denormalize(images_gt)
+    images_pred = denormalize(images_pred)
 
     grid_pred = torchvision.utils.make_grid(images_pred, nrow=4)
     grid = torchvision.utils.make_grid(images_gt, nrow=4)
@@ -61,13 +61,13 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="mnist")
     args = parser.parse_args()
 
-    run_name = f"vqvae-{args.dataset}-{time.time():.0f}"
-    run_folder = Path("runs_vqvae") / run_name
+    run_name = f"vqgan-{args.dataset}-{time.time():.0f}"
+    run_folder = Path("runs_vqgan") / run_name
     run_folder.mkdir(exist_ok=True, parents=True)
     print("running: ", run_name)
 
     config = model_configs[args.dataset]
-    vqvae_config = config["vqvae_config"]
+    vqgan_config = config["vqgan_config"]
     bs, lr, epochs = 16, 4e-5, 1000
 
     wandb.init(project="my_vqgan",
@@ -76,13 +76,13 @@ if __name__ == "__main__":
                        "batch_size": bs, 
                        "epochs": epochs,
                        "lr": lr,
-                       "vqvae_config": vqvae_config.__dict__,
+                       "vqgan_config": vqgan_config.__dict__,
                        })
 
     train_dataset, test_dataset = config["fetch_train"](), config["fetch_test"]()
 
     print(f"train_sz={len(train_dataset)}, test_sz={len(test_dataset)}")
-    print(f"K={vqvae_config.K}, D={vqvae_config.D}")
+    print(f"K={vqgan_config.K}, D={vqgan_config.D}")
 
 
     idxs = torch.randint(0, len(test_dataset), (16,))
@@ -108,8 +108,8 @@ if __name__ == "__main__":
             drop_last=True
     )
 
-    model = VQGAN(vqvae_config).to(device)
-    discriminator = Discriminator(vqvae_config).to(device)
+    model = VQGAN(vqgan_config).to(device)
+    discriminator = Discriminator(vqgan_config).to(device)
 
     optim = torch.optim.Adam(
             model.parameters(), 
@@ -130,12 +130,10 @@ if __name__ == "__main__":
     mse_loss_fn = nn.MSELoss()
     perceptual_loss_fn = LPIPS().eval().to(device)
 
-    with torch.no_grad(): model(torch.randn(8, vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.image_sz).to(device))
-
     best_loss = float("inf")
     best_model = None
 
-    val_res = eval_vqvae(model, test_loader)
+    val_res = eval_vqgan(model, test_loader)
     wandb.log({**val_res})
 
     step = 0
@@ -199,25 +197,22 @@ if __name__ == "__main__":
                            "g_loss": g_loss.item(),
                            "lambda": lamb.item(),
                            "disc_factor": disc_factor,
-                           "util": len(util)/vqvae_config.K})
+                           "util": len(util)/vqgan_config.K})
 
             if step % 100 == 0:
-                val_res = eval_vqvae(model, test_loader)
+                val_res = eval_vqgan(model, test_loader)
                 wandb.log({**val_res})
-                plot_results(model, test_dataset, config["stats"], path=run_folder / f"test_{args.dataset}_{step}.jpg", idxs=idxs)
+                plot_results(model, test_dataset, path=run_folder / f"test_{args.dataset}_{step}.jpg", idxs=idxs)
                 wandb.log({"test_reconstruction": [wandb.Image(str(run_folder / f"test_{args.dataset}_{step}.jpg"))]})
-                plot_results(model, train_dataset, config["stats"], path=run_folder / f"train_{args.dataset}_{step}.jpg", idxs=idxs)
+                plot_results(model, train_dataset, path=run_folder / f"train_{args.dataset}_{step}.jpg", idxs=idxs)
                 wandb.log({"train_reconstruction": [wandb.Image(str(run_folder / f"train_{args.dataset}_{step}.jpg"))]})
 
             step += 1
         et = time.perf_counter()
 
-        val_res = eval_vqvae(model, test_loader)
+        val_res = eval_vqgan(model, test_loader)
         wandb.log({**val_res, "epoch":epoch})
 
         if val_res["valid/loss"] < best_loss:
             best_loss = val_res["valid/loss"]
             torch.save(model.state_dict(), run_folder / f"{args.dataset}_best.pth")
-
-    model.load_state_dict(torch.load(run_folder / f"{args.dataset}_best.pth"))
-    plot_results(model, test_dataset, config["stats"], path=f"{args.dataset}_random_sample.jpg")

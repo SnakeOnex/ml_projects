@@ -18,6 +18,6 @@ ml load matplotlib/3.8.2-gfbf-2023b
 ml load PyTorch-Lightning/2.4.0-foss-2023b-CUDA-12.4.0
 ml load tqdm/4.66.2-GCCcore-13.2.0
 python -m wandb online
-#python train_vqgan.py --dataset bird
-#python train_gpt.py --dataset bird
-python train_maskgit.py --dataset bird
+#python train_vqgan.py --dataset imagenet
+python train_gpt.py --dataset bird
+#python train_maskgit.py --dataset bird

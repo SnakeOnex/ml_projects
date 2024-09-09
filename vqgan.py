@@ -4,11 +4,9 @@ from dataclasses import dataclass
 @dataclass
 class VQGANConfig:
     in_channels: int = 3
-    image_sz: int = 32
-    ch_base: int = 32
-    ch_mult: tuple[int] = (1, 2)
-    K: int = 512
-    D: int = 64
+    image_sz: int = 256
+    K: int = 2048
+    D: int = 256
     beta: float = 0.25
 
     @property
@@ -20,10 +18,6 @@ class VQGANConfig:
         return 2**(self.num_resolutions-1)
 
     @property
-    def final_channels(self):
-        return self.ch_base * self.ch_mult[-1]
-
-    @property
     def latent_dim(self):
         return self.D
 
@@ -32,7 +26,7 @@ class VQGANConfig:
         return self.K
 
 class VQGAN(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args: VQGANConfig):
         super(VQGAN, self).__init__()
         self.encoder = Encoder(double_z=False, z_channels=256, resolution=256, in_channels=3, out_ch=3, ch=128,
                                ch_mult=[1, 1, 2, 2, 4], num_res_blocks=2, attn_resolutions=[16], dropout=0.0)

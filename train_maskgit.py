@@ -4,14 +4,14 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from vqgan import VQGAN
 from model_configs import model_configs
-from gpt import GPTLanguageModel
+from gpt import GPTLanguageModel, GPTConfig
 from utils import get_free_gpu, denormalize
 
 device = torch.device(get_free_gpu())
 # device = torch.device("cpu")
 print("selected device: ", device)
 
-def generate_sample(path, stats):
+def generate_sample(path):
     gpt.eval()
     images = torch.zeros((0,C,SZ,SZ)).to(device)
 
@@ -31,8 +31,8 @@ def generate_sample(path, stats):
     res[res >= K] = K-1
     print(f"{res.min()=}, {res.max()=}, {res.float().mean()=}")
     # exit(0)
-    imgs = model.decode(res)
-    images = denormalize(imgs, stats)
+    imgs = vqgan.decode(res)
+    images = denormalize(imgs)
 
     grid_pred = torchvision.utils.make_grid(images, nrow=4)
     grid_final = grid_pred.permute(1, 2, 0)
@@ -58,28 +58,28 @@ if __name__ == "__main__":
 
 
     config = model_configs[args.dataset]
-    vqvae_config = config["vqvae_config"]
+    vqvae_config = config["vqgan_config"]
     # C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
     C, SZ, K, D = vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.K, vqvae_config.D
-    CONVS = vqvae_config.num_resolutions-1
+    CONVS = 4
     # IMAGE_TOKENS = (SZ//CONVS)**2+1
     IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
     block_size = IMAGE_TOKENS-1
-    batch_size = 8
-    p_keep = 0.5
+    batch_size = 4
     eval_iters = 10
-    eval_interval = 100
+    eval_interval = 250
     max_iters = 500000
     print(f"dataset={args.dataset}, {C=}, {SZ=}, {IMAGE_TOKENS=}, {block_size=}, {batch_size=}\
             {eval_iters=}, {max_iters=}, {K=} {D=}")
 
-    gpt_config = {
-        "block_size": block_size,
-        "vocab_size": K+1,
-        "n_embd": 1024,
-        "n_head": 16,
-        "n_layer": 10,
-    }
+    gpt_config = GPTConfig(
+            block_size=block_size, 
+            vocab_size=K+1, 
+            n_embd=1024, 
+            n_head=16, 
+            n_layer=24,
+            causal=False,
+    )
 
     wandb.init(project="maskgit-vqgan",
                name=run_name,
@@ -87,7 +87,6 @@ if __name__ == "__main__":
                        "batch_size": batch_size, 
                        "max_iters": max_iters,
                        "lr": args.lr,
-                       "p_keep": p_keep,
                        "K": K,
                        "SZ": SZ,
                        "C": C,
@@ -116,12 +115,12 @@ if __name__ == "__main__":
             persistent_workers=True
     )
 
-    model = VQGAN(vqvae_config).to(device)
+    vqgan = VQGAN(vqvae_config).to(device)
     # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
-    model.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
-    model.eval()
+    vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
+    vqgan.eval()
 
-    gpt = GPTLanguageModel(**gpt_config).to(device)
+    gpt = GPTLanguageModel(gpt_config).to(device)
     params = sum(p.numel() for p in gpt.parameters())
     print(f"number of parameters: {params / 1_000_000:.1f}M")
     gpt.train()
@@ -171,7 +170,7 @@ if __name__ == "__main__":
             x, y = x.to(device), y.to(device)
 
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=amp_enabled):
-                _, quantized, _ = model(x)
+                _, quantized, _ = vqgan(x)
 
                 quantized = quantized.view(x.shape[0], -1)
 
@@ -242,7 +241,7 @@ if __name__ == "__main__":
                 optim.zero_grad()
 
             if i % 1000 == 0:
-                generate_sample(run_folder / f"{epoch}.png", config["stats"])
+                generate_sample(run_folder / f"{epoch}.png")
                 wandb.log({"gen_sample": [wandb.Image(str(run_folder / f"{epoch}.png"))]})
 
         # bar = tqdm.tqdm(test_loader)
@@ -250,7 +249,7 @@ if __name__ == "__main__":
         # with torch.no_grad():
             # for i, (x, y) in enumerate(bar):
                 # x, y = x.to(device), y.to(device)
-                # _, quantized, _ = model(x)
+                # _, quantized, _ = vqgan(x)
 
                 # quantized = quantized.view(x.shape[0], -1)
                 # # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
