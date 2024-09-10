@@ -82,7 +82,7 @@ if __name__ == "__main__":
     IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
     block_size = IMAGE_TOKENS-1
     batch_size = 4
-    p_keep = 0.5
+    p_keep = 0.8
     eval_iters = 10
     eval_interval = 250
     max_iters = 500000
@@ -135,7 +135,9 @@ if __name__ == "__main__":
 
     vqgan = VQGAN(vqvae_config).to(device)
     # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
-    vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
+    # vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
+    # vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
+    vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth", map_location=device))
     vqgan.eval()
 
     gpt = GPTLanguageModel(gpt_config).to(device)

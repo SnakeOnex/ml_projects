@@ -199,7 +199,7 @@ if __name__ == "__main__":
                            "disc_factor": disc_factor,
                            "util": len(util)/vqgan_config.K})
 
-            if step % 100 == 0:
+            if step % 1000 == 0:
                 val_res = eval_vqgan(model, test_loader)
                 wandb.log({**val_res})
                 plot_results(model, test_dataset, path=run_folder / f"test_{args.dataset}_{step}.jpg", idxs=idxs)
