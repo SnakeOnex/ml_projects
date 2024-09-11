@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torchvision, argparse, time, time, tqdm, PIL, wandb, torch.nn.functional as F
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqgan import VQGAN, Discriminator, VQGANConfig
+from vqgan import VQGAN, VQGANConfig
 from model_configs import dataset_loaders
 import matplotlib.pyplot as plt
 from utils import get_free_gpu, denormalize
@@ -119,7 +119,8 @@ class TrainVQGAN:
     def train(self):
         for epoch in range(self.config.epochs):
             util = set()
-            for x, _ in tqdm.tqdm(self.train_loader):
+            bar = tqdm.tqdm(self.train_loader)
+            for x, _ in bar:
                 x = x.to(device)
 
 
