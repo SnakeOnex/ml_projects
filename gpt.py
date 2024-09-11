@@ -18,6 +18,12 @@ class GPTConfig:
 # hyperparameters
 # ------------
 
+def gamma_func(ratio, mode):
+    if mode == "linear":
+        return 1 - ratio
+    elif mode == "square":
+        return 1 - ratio ** 2
+
 torch.manual_seed(1337)
 
 class Head(nn.Module):
@@ -177,21 +183,24 @@ class GPTLanguageModel(nn.Module):
     def generate_maskgit(self, init, steps=1):
         self.eval()
 
-        mask = torch.zeros_like(init).bool()
+        mask = torch.ones_like(init).to(dtype=torch.int64)
         output = torch.zeros_like(init)+init
         with torch.no_grad():
             for step in range(steps):
                 print("pre: ", torch.sum(mask[0,:]))
                 logits, _ = self(output)
                 probs = F.softmax(logits, dim=-1)
-
                 B, T, C = probs.shape
+
+                ratio = torch.tensor(step / steps)
+                gamma_r = gamma_func(ratio, mode='square')
+                mask_count = (gamma_r * T).ceil().to(torch.int64)
 
                 samples_vec = torch.ones((B, T), device=probs.device, dtype=torch.int64)
 
 
-                def gamma_func(r):
-                    return 256 // r
+                # def gamma_func(r):
+                    # return 256 // r
 
                 # we have a [B, 256, 2048] tensor of probabilities
                 # then we get [B, 256] tensor of sampled indices
@@ -204,14 +213,14 @@ class GPTLanguageModel(nn.Module):
                 print("sampled_probs: ", sampled_probs.shape)
                 print(sampled_probs[0, :10])
 
-                sampled_probs[mask] = 0. # mask out the already sampled tokens
+                sampled_probs[(1-mask)] = 0. # mask out the already sampled tokens
                 sorted_probs = torch.argsort(sampled_probs, dim=-1, descending=True)
 
                 print("highest probs: ", sampled_probs[0, sorted_probs[0, :10]])
 
                 # unmask the top gamma_func(steps) tokens (for each example in the batch)
-                top_k = sorted_probs[:, :gamma_func(steps)]
-                mask[torch.arange(B).view(-1, 1), top_k] = 1
+                top_k = sorted_probs[:, :gamma_func(steps, mode='square')]
+                mask[torch.arange(B).view(-1, 1), top_k] = 0
                 output[torch.arange(B).view(-1, 1), top_k] = samples_vec[torch.arange(B).view(-1, 1), top_k]
                 print("post: ", torch.sum(mask[0,:]))
         self.train()

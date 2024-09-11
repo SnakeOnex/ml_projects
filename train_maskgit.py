@@ -11,6 +11,12 @@ device = torch.device(get_free_gpu())
 # device = torch.device("cpu")
 print("selected device: ", device)
 
+def gamma_func(ratio, mode):
+    if mode == "linear":
+        return 1 - ratio
+    elif mode == "square":
+        return 1 - ratio ** 2
+
 def generate_sample(path):
     gpt.eval()
     images = torch.zeros((0,C,SZ,SZ)).to(device)
@@ -65,10 +71,11 @@ if __name__ == "__main__":
     # IMAGE_TOKENS = (SZ//CONVS)**2+1
     IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
     block_size = IMAGE_TOKENS-1
-    batch_size = 4
+    batch_size = 8
     eval_iters = 10
     eval_interval = 250
     max_iters = 500000
+    gamma_mode = "linear"
     print(f"dataset={args.dataset}, {C=}, {SZ=}, {IMAGE_TOKENS=}, {block_size=}, {batch_size=}\
             {eval_iters=}, {max_iters=}, {K=} {D=}")
 
@@ -77,7 +84,7 @@ if __name__ == "__main__":
             vocab_size=K+1, 
             n_embd=1024, 
             n_head=16, 
-            n_layer=24,
+            n_layer=12,
             causal=False,
     )
 
@@ -117,7 +124,9 @@ if __name__ == "__main__":
 
     vqgan = VQGAN(vqvae_config).to(device)
     # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
-    vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
+    # vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
+    # vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth", map_location=device))
+    vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth", map_location=device))
     vqgan.eval()
 
     gpt = GPTLanguageModel(gpt_config).to(device)
@@ -159,9 +168,20 @@ if __name__ == "__main__":
     optim = torch.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9,0.95))
     scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
-    # for x, y in tqdm.tqdm(test_loader):
 
-    # do the same for loop but instatiate the loading bar
+    ## maskgit sanity check
+    # for the input we create a binary mask with 1s and 0s
+    # 1s -> replace the original latent token with special masked token
+    # 0s -> keep the original token
+    # sampling is done with a gamma function gamma(r), where r is a [0,1] scalar
+    # training: 
+    #    we sample r from a uniform distribution
+    #    we then obtain number of tokens to mask by ceil(gamma(r) * T), where T is the vec len
+    #    we then uniformly mask the corresponding number of tokens in the image and have the model predict them
+    # gamma function design:
+    #    linear: 1 - r
+    #    square: 1 - r ** 2
+
 
     for epoch in range(1000):
         bar = tqdm.tqdm(train_loader)
@@ -193,38 +213,28 @@ if __name__ == "__main__":
                     # print(torch.sum(mask[b,:]).item())
                 # tokens_x = mask * quantized + (1 - mask) * K
 
-                p_keep = torch.rand((B,1), device=device)
-                mask = torch.bernoulli(p_keep * torch.ones(quantized.shape, device=device)).to(dtype=torch.int64)
-                masked_input = torch.zeros_like(quantized)+K
-                tokens_x = mask * quantized + (1 - mask) * masked_input
+                ratio = torch.rand((B,1), device=device)
+                gamma_r = gamma_func(ratio, gamma_mode)
+                mask_count = (gamma_r * T).ceil().to(dtype=torch.int64)
+                # print("mask_count: ", mask_count)
 
-                # print(tokens_x.shape)
-                # exit(0)
+                mask = torch.zeros((B, T), device=device).to(dtype=torch.int64)
+                for b in range(B):
+                    indices = torch.randperm(T, device=device)[:mask_count[b]]
+                    mask[b, indices] = 1
+                tokens_x = mask * K + (1 - mask) * quantized
 
-                # print("masked_input.shape: ", masked_input.shape)
-                # print("tokens_x.shape: ", tokens_x.shape)
+                # mask = torch.bernoulli(p_keep * torch.ones(quantized.shape, device=device)).to(dtype=torch.int64)
+                # masked_input = torch.zeros_like(quantized)+K
+                # tokens_x = mask * quantized + (1 - mask) * masked_input
 
                 logits, _ = gpt(tokens_x)
-                # confidences = torch.softmax(logits, dim=-1)
                 targets = quantized
 
-                # print(logits.shape, targets.shape)
-                # exit(0)
                 B, T, C = logits.shape
                 logits = logits.view(B*T, C)
                 targets = targets.reshape(B*T)
                 loss = F.cross_entropy(logits, targets)
-
-                # what is the loss?
-                # what is the mask?
-                
-                # print(f"{logits.shape=}")
-
-                # exit(0)
-
-                # mask = torch.bernoulli(p_keep * torch.ones(tokens_x.shape, device=device)).to(dtype=torch.int64)
-                # random_indices = torch.randint_like(tokens_x, gpt_config["vocab_size"])
-                # tokens_x = mask * tokens_x + (1 - mask) * random_indices
 
                 # tokens, loss = gpt(tokens_x, tokens_y)
                 bar.set_description(f"loss: {loss.item():.4f}")
