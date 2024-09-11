@@ -137,7 +137,8 @@ if __name__ == "__main__":
     # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
     # vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
     # vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
-    vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth", map_location=device))
+    # vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth", map_location=device))
+    vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth", map_location=device))
     vqgan.eval()
 
     gpt = GPTLanguageModel(gpt_config).to(device)

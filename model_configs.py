@@ -1,49 +1,34 @@
-import PIL, numpy as np, torch
+import torch
 from pathlib import Path
 from torchvision import transforms, datasets
 from torchvision.transforms import v2
 from torchvision.io import read_image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
-from vqgan import VQGANConfig
-from vqvae import VQVAEConfig
-from utils import compute_stats
 
-mnist_stats = ([0.5], [0.5])
-mnist_trans = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mnist_stats[0], mnist_stats[1]),
-])
-mnist_vqvae_config = VQVAEConfig(in_channels=1, image_sz=28, ch_base=16, ch_mult=(1,2), K=512, D=64)
-mnist_config = {
-    'vqvae_config': mnist_vqvae_config,
-    'stats': mnist_stats,
-    'fetch_train': lambda: datasets.MNIST(root='./data', train=True, download=True, transform=mnist_trans),
-    'fetch_test': lambda: datasets.MNIST(root='./data', train=False, download=True, transform=mnist_trans),
-}
+def make_loader(dataset, bs, shuffle, num_workers=2):
+    return DataLoader(
+            dataset, 
+            batch_size=bs, 
+            shuffle=shuffle, 
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True)
 
-
-cifar10_stats = ([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-cifar10_trans = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(cifar10_stats[0], cifar10_stats[1]),
-])
-cifar10_vqvae_config = VQVAEConfig(in_channels=3, image_sz=32, ch_base=64, ch_mult=(1,2,4), K=512, D=64)
-cifar10_config = {
-    'vqvae_config': cifar10_vqvae_config,
-    'stats': cifar10_stats,
-    'fetch_train': lambda: datasets.CIFAR10(root='./data', train=True, download=True, transform=cifar10_trans),
-    'fetch_test': lambda: datasets.CIFAR10(root='./data', train=False, download=True, transform=cifar10_trans),
-}
-
-bird_stats = ([1.0, 1.0, 1.0], [127.5, 127.5, 127.5])
-bird_trans = transforms.Compose([
+image_transforms = transforms.Compose([
     v2.Resize(256),
     v2.CenterCrop(256),
     v2.ToDtype(torch.float32, scale=True),
     v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
 ])
-bird_vqgan_config = VQGANConfig(K=2048, D=256, image_sz=256)
+
+pil_transforms = transforms.Compose([
+    v2.Resize(256),
+    v2.CenterCrop(256),
+    v2.PILToTensor(),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+])
 
 class BirdDataset(Dataset):
     def __init__(self, path, transform=None):
@@ -53,7 +38,6 @@ class BirdDataset(Dataset):
             if subdir.is_dir():
                 for img_pth in subdir.iterdir():
                     self.data.append((str(img_pth), y))
-        print(f'Found {len(self.data)} images in {path}')
 
     def __len__(self): return len(self.data)
     
@@ -62,23 +46,6 @@ class BirdDataset(Dataset):
         label = torch.tensor(self.data[idx][1])
         if self.transform is not None: img = self.transform(img)
         return img, label
-
-
-bird_dataset = BirdDataset(path='../../train', transform=bird_trans)
-
-train_set_sz = int(len(bird_dataset)*0.9)
-test_set_sz = len(bird_dataset) - train_set_sz
-train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [train_set_sz, test_set_sz])
-
-# use Subset
-# train_bird_set = Subset(bird_dataset, range(0, 2000))
-# test_bird_set = Subset(bird_dataset, range(2000, 2200))
-
-bird_config = {
-    'vqgan_config': bird_vqgan_config,
-    'fetch_train': lambda: train_bird_set,
-    'fetch_test': lambda: test_bird_set,
-}
 
 class FlowerDataset(Dataset):
     def __init__(self, path, transform=None):
@@ -90,47 +57,31 @@ class FlowerDataset(Dataset):
         if self.transform is not None: img = self.transform(img)
         return img, torch.tensor(0)
 
-flower_dataset = FlowerDataset(path='flowers', transform=bird_trans)
+def make_bird_loader(bs):
+    bird_dataset = BirdDataset(path='../../train', transform=image_transforms)
+    train_set_sz = int(len(bird_dataset)*0.9)
+    test_set_sz = len(bird_dataset) - train_set_sz
+    train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [train_set_sz, test_set_sz])
+    return make_loader(train_bird_set, bs=bs, shuffle=True), make_loader(test_bird_set, bs=bs, shuffle=False)
 
-train_set_sz = int(len(flower_dataset)*0.9)
-test_set_sz = len(flower_dataset) - train_set_sz
-train_flower_set, test_flower_set = torch.utils.data.random_split(flower_dataset, [train_set_sz, test_set_sz])
+def make_flower_loader(bs):
+    flower_dataset = FlowerDataset(path='flowers', transform=image_transforms)
+    train_set_sz = int(len(flower_dataset)*0.9)
+    test_set_sz = len(flower_dataset) - train_set_sz
+    train_flower_set, test_flower_set = torch.utils.data.random_split(flower_dataset, [train_set_sz, test_set_sz])
+    return make_loader(train_flower_set, bs=bs, shuffle=True), make_loader(test_flower_set, bs=bs, shuffle=False)
 
-flower_config = {
-    'vqgan_config': bird_vqgan_config,
-    'fetch_train': lambda: train_flower_set,
-    'fetch_test': lambda: test_flower_set,
+def make_imagenet_loader(bs):
+    path_to_imagenet='/mnt/data/Public_datasets/imagenet/imagenet_pytorch'
+    train_sz, test_sz = 100_000, 10_000
+    train_set = datasets.ImageNet(root=path_to_imagenet, split='train', transform=imagenet_trans)
+    test_set = datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans)
+    train_set, _ = torch.utils.data.random_split(train_set, [train_sz, len(train_set)-train_sz])
+    test_set, _ = torch.utils.data.random_split(test_set, [test_sz, len(test_set)-test_sz])
+    return make_loader(train_set, bs=bs, shuffle=True), make_loader(test_set, bs=bs, shuffle=False)
+
+dataset_loaders = {
+    "bird": make_bird_loader,
+    "flower": make_flower_loader,
+    "imagenet": make_imagenet_loader,
 }
-
-# imagenet_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-# imagenet_trans = transforms.Compose([
-    # transforms.Resize(64),
-    # transforms.CenterCrop(48),
-    # transforms.ToTensor(),
-    # transforms.Normalize(mean=imagenet_stats[0], std=imagenet_stats[1]),
-# ])
-# path_to_imagenet='/datagrid/public_datasets/imagenet/imagenet_pytorch'
-
-imagenet_trans = transforms.Compose([
-    v2.Resize(256),
-    v2.CenterCrop(256),
-    v2.PILToTensor(),
-    v2.ToDtype(torch.float32, scale=True),
-    v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-])
-path_to_imagenet='/mnt/data/Public_datasets/imagenet/imagenet_pytorch'
-train_sz, test_sz = 100_000, 10_000
-imagenet_config = {
-    'vqgan_config': bird_vqgan_config,
-    'fetch_train': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='train', transform=imagenet_trans), range(train_sz)),
-    'fetch_test': lambda: Subset(datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans), range(test_sz)),
-}
-
-model_configs = {
-    'mnist': mnist_config,
-    'cifar10': cifar10_config,
-    'imagenet': imagenet_config,
-    'bird': bird_config,
-    'flower': flower_config
-}
-
