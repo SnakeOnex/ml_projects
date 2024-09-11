@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torchvision, argparse, time, time, tqdm, PIL, wandb, torch.nn.functional as F
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqgan import VQGAN, VQGANConfig
+from vqgan import VQGAN, VQGANConfig, Discriminator
 from model_configs import dataset_loaders
 import matplotlib.pyplot as plt
 from utils import get_free_gpu, denormalize
@@ -21,7 +21,7 @@ class TrainVQGANConfig:
     betas: tuple = (0.5, 0.9)
     eps: float = 1e-8
     disc_factor: float = 0.2
-    disc_kickoff: int = 25_000
+    disc_kickoff: int = 100_000
     log_interval: int = 10
     eval_interval: int = 500
 
