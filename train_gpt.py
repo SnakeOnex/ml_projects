@@ -1,7 +1,6 @@
-import argparse, time, time, tqdm, PIL, wandb, numpy as np, pickle
+import argparse, time, tqdm, PIL, wandb, numpy as np
 import torch, torch.nn as nn, torchvision
 from pathlib import Path
-from torch.utils.data import DataLoader
 from vqgan import VQGAN, VQGANConfig
 from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
@@ -9,7 +8,6 @@ from utils import get_free_gpu, denormalize
 from dataclasses import dataclass, field
 
 device = torch.device(get_free_gpu())
-# device = torch.device("cpu")
 print("selected device: ", device)
 
 @dataclass
@@ -145,20 +143,17 @@ class TrainGPT:
     
     @torch.inference_mode()
     def generate_completions(self, path):
-        print('Generating completions')
         idxs = torch.randint(0, len(self.test_dataset), (4,))
         images_gt = torch.stack([self.test_dataset[i][0] for i in idxs]).to(device)
 
         with torch.inference_mode():
             images_rec, quantized, _ = self.vqgan(images_gt.to(device))
-        print('Generating completions')
         quantized = quantized.view(images_gt.shape[0], -1)[:,:128]
         image_tokens = torch.cat([torch.ones((images_gt.shape[0],1), device=device).to(torch.int64)*self.config.vqgan_config.K, quantized], dim=1)
         res = self.gpt.generate(image_tokens, 128)[:,1:]
         images_comp = denormalize(self.vqgan.decode(res))
         images_gt = denormalize(images_gt)
         images_rec = denormalize(images_rec)
-        print('Generating completions')
 
         grid_gt = torchvision.utils.make_grid(images_gt, nrow=4)
         grid_rec = torchvision.utils.make_grid(images_rec, nrow=4)
@@ -173,7 +168,6 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=2.25e-6)
     parser.add_argument("--batch_size", type=int, default=16)
     args = parser.parse_args()
-
 
     vqgan_config = VQGANConfig(K=1024, D=256)
     gpt_config = GPTConfig(

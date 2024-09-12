@@ -1,14 +1,14 @@
-import argparse, time, time, tqdm, PIL, wandb, numpy as np, pickle
+import argparse, time, tqdm, PIL, wandb, numpy as np
 import torch, torch.nn as nn, torchvision, torch.nn.functional as F
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqgan import VQGAN
-from model_configs import model_configs
+from vqgan import VQGAN, VQGANConfig
+from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
 from utils import get_free_gpu, denormalize
+from dataclasses import dataclass, field
 
 device = torch.device(get_free_gpu())
-# device = torch.device("cpu")
 print("selected device: ", device)
 
 def gamma_func(ratio, mode):
@@ -17,260 +17,213 @@ def gamma_func(ratio, mode):
     elif mode == "square":
         return 1 - ratio ** 2
 
-def generate_sample(path):
-    gpt.eval()
-    images = torch.zeros((0,C,SZ,SZ)).to(device)
+@dataclass
+class TrainMaskGITConfig:
+    gpt_config: GPTConfig
+    vqgan_path: str
+    vqgan_config: VQGANConfig = field(default_factory=lambda: VQGANConfig(K=1024, D=256))
+    dataset: str = "flower"
+    batch_size: int = 16
+    epochs: int = 1000
+    lr: float = 4e-5
+    schedule: str = "square"
+    betas: tuple = (0.5, 0.9)
+    log_interval: int = 10
+    eval_interval: int = 500
 
-    # context = torch.zeros((16, 1), dtype=torch.long, device=device)
-    # idx = torch.randint(0, tokens.shape[0], (1,))
-    idx = torch.ones((16,1), dtype=torch.long, device=device)*K
-    # context[:, 0] = idx
-    context = idx
+class TrainMaskGIT:
+    def __init__(self, config: TrainMaskGITConfig):
+        self.config = config
 
-    context = torch.ones((16,256), dtype=torch.long, device=device)*K
-    res = gpt.generate_maskgit(context, steps=8)
-    # print("res: ", res.shape)
-    # exit(0)
+        # 1. init models
+        self.vqgan = VQGAN(config.vqgan_config).to(device).eval()
+        self.vqgan.load_state_dict(torch.load(self.config.vqgan_path, map_location=device))
+        self.gpt = GPTLanguageModel(config.gpt_config).to(device)
 
-    # res = res[:,1:]
-    print(f"{res.min()=}, {res.max()=}, {res.float().mean()=}")
-    res[res >= K] = K-1
-    print(f"{res.min()=}, {res.max()=}, {res.float().mean()=}")
-    # exit(0)
-    imgs = vqgan.decode(res)
-    images = denormalize(imgs)
+        # 2. optimizers
+        self.optim = self.configure_optimizers()
 
-    grid_pred = torchvision.utils.make_grid(images, nrow=4)
-    grid_final = grid_pred.permute(1, 2, 0)
+        # 3. dataset
+        self.train_loader, self.test_loader = dataset_loaders[self.config.dataset](self.config.batch_size)
+        self.train_dataset, self.test_dataset = self.train_loader.dataset, self.test_loader.dataset
 
-    grid_final = grid_final.cpu().detach().numpy()
-    grid_final = (grid_final * 255).astype("uint8")
-    grid_final = PIL.Image.fromarray(grid_final)
-    grid_final.save(path)
-    gpt.train()
+        # 4. run folder
+        run_name = f"maskgit-{self.config.dataset}-{time.time():.0f}"
+        self.run_folder = Path("runs_maskgit") / run_name
+        self.run_folder.mkdir(exist_ok=True, parents=True)
+        wandb.init(project="maskgit", name=run_name, config={**self.config.__dict__})
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--save_tokens", action="store_true")
-    args = parser.parse_args()
+        # 4. running variables
+        self.steps = 0
+        self.best_loss = float("inf")
 
-    run_name = f"gpt-{args.dataset}-{time.time():.0f}"
-    print("run_name: ", run_name)
+    def configure_optimizers(self):
+        decay, no_decay = set(), set()
+        whitelist_weight_modules = (nn.Linear, )
+        blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
+        for mn, m in self.gpt.named_modules():
+            for pn, p in m.named_parameters():
+                fpn = f"{mn}.{pn}" if mn else pn
+                if pn.endswith("bias"): no_decay.add(fpn)
+                elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules): decay.add(fpn)
+                elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules): no_decay.add(fpn)
+        no_decay.add("position_embedding_table.weight")
+        param_dict = {pn: p for pn, p in self.gpt.named_parameters()}
+        optim_groups = [{"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": 0.01},
+                        {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0}]
+        return torch.optim.AdamW(optim_groups, lr=self.config.lr, betas=self.config.betas)
 
-    run_folder = Path("runs") / run_name
-    run_folder.mkdir(exist_ok=True, parents=True)
-
-
-    config = model_configs[args.dataset]
-    vqvae_config = config["vqgan_config"]
-    # C, SZ, K, D = config["channels"], config["image_sz"], config["K"], config["D"]
-    C, SZ, K, D = vqvae_config.in_channels, vqvae_config.image_sz, vqvae_config.K, vqvae_config.D
-    CONVS = 4
-    # IMAGE_TOKENS = (SZ//CONVS)**2+1
-    IMAGE_TOKENS = (SZ//(2**CONVS))**2+1
-    block_size = IMAGE_TOKENS-1
-    batch_size = 8
-    eval_iters = 10
-    eval_interval = 250
-    max_iters = 500000
-    gamma_mode = "linear"
-    print(f"dataset={args.dataset}, {C=}, {SZ=}, {IMAGE_TOKENS=}, {block_size=}, {batch_size=}\
-            {eval_iters=}, {max_iters=}, {K=} {D=}")
-
-    gpt_config = GPTConfig(
-            block_size=block_size, 
-            vocab_size=K+1, 
-            n_embd=1024, 
-            n_head=16, 
-            n_layer=12,
-            causal=False,
-    )
-
-    wandb.init(project="maskgit-vqgan",
-               name=run_name,
-               config={"dataset": args.dataset, 
-                       "batch_size": batch_size, 
-                       "max_iters": max_iters,
-                       "lr": args.lr,
-                       "K": K,
-                       "SZ": SZ,
-                       "C": C,
-                       "gpt_config": gpt_config,
-                       })
-
-    train_dataset, test_dataset = config["fetch_train"](), config["fetch_test"]()
-    print(f"train_sz={len(train_dataset)}, test_sz={len(test_dataset)}")
-
-    train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=False,
-            num_workers=2, 
-            prefetch_factor=4, 
-            pin_memory=True,
-            persistent_workers=True
-    )
-    test_loader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size, 
-            shuffle=False, 
-            num_workers=2, 
-            prefetch_factor=4, 
-            pin_memory=True,
-            persistent_workers=True
-    )
-
-    vqgan = VQGAN(vqvae_config).to(device)
-    # model.load_state_dict(torch.load(f"checkpoints/{args.dataset}_best.pth", map_location=device))
-    # vqgan.load_state_dict(torch.load(f"runs_vqvae/vqvae-bird-1725458794/bird_best.pth", map_location=device))
-    # vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth", map_location=device))
-    vqgan.load_state_dict(torch.load(f"runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth", map_location=device))
-    vqgan.eval()
-
-    gpt = GPTLanguageModel(gpt_config).to(device)
-    params = sum(p.numel() for p in gpt.parameters())
-    print(f"number of parameters: {params / 1_000_000:.1f}M")
-    gpt.train()
-
-    tokens = torch.zeros((0,IMAGE_TOKENS), dtype=torch.long, device=device)
-
-    decay, no_decay = set(), set()
-    whitelist_weight_modules = (nn.Linear, )
-    blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
-
-    # for mn, m in gpt.transformer.named_modules():
-    for mn, m in gpt.named_modules():
-        for pn, p in m.named_parameters():
-            fpn = f"{mn}.{pn}" if mn else pn
-
-            if pn.endswith("bias"):
-                no_decay.add(fpn)
-
-            elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
-                decay.add(fpn)
-
-            elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
-                no_decay.add(fpn)
-
-    no_decay.add("position_embedding_table.weight")
-
-    param_dict = {pn: p for pn, p in gpt.named_parameters()}
-
-    optim_groups = [
-        {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": 0.01},
-        {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
-    ]
-
-    # optim = torch.optim.AdamW(gpt.parameters(), lr=args.lr)
-    amp_enabled = False
-    optim = torch.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9,0.95))
-    scaler = torch.amp.GradScaler(enabled=amp_enabled)
-
-
-    ## maskgit sanity check
-    # for the input we create a binary mask with 1s and 0s
-    # 1s -> replace the original latent token with special masked token
-    # 0s -> keep the original token
-    # sampling is done with a gamma function gamma(r), where r is a [0,1] scalar
-    # training: 
-    #    we sample r from a uniform distribution
-    #    we then obtain number of tokens to mask by ceil(gamma(r) * T), where T is the vec len
-    #    we then uniformly mask the corresponding number of tokens in the image and have the model predict them
-    # gamma function design:
-    #    linear: 1 - r
-    #    square: 1 - r ** 2
-
-
-    for epoch in range(1000):
-        bar = tqdm.tqdm(train_loader)
-
-        for i, (x, y) in enumerate(bar):
+    @torch.no_grad()
+    def evaluate(self):
+        val_loss = 0
+        bar = tqdm.tqdm(self.test_loader, desc="eval")
+        for x, y in bar:
             x, y = x.to(device), y.to(device)
+            _, quantized, _ = self.vqgan(x)
+            quantized = quantized.view(x.shape[0], -1)
+            B, T = quantized.shape
 
-            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=amp_enabled):
-                _, quantized, _ = vqgan(x)
+            ratio = torch.rand((B,1), device=device)
+            gamma_r = gamma_func(ratio, self.config.schedule)
+            mask_count = (gamma_r * T).ceil().to(dtype=torch.int64)
+            mask = torch.zeros((B, T), device=device).to(dtype=torch.int64)
+            for b in range(B):
+                indices = torch.randperm(T, device=device)[:mask_count[b]]
+                mask[b, indices] = 1
+            tokens_x = mask * self.config.vqgan_config.K + (1 - mask) * quantized
+            tokens_y = quantized
+            logits, _ = self.gpt(tokens_x)
+            loss = F.cross_entropy(logits.view(B*T, -1), tokens_y.reshape(B*T))
+            bar.set_postfix(loss=f"{loss.item():.4f}")
+            val_loss += loss.item()
+        val_loss /= len(self.test_loader)
+        wandb.log({"val/loss": val_loss})
 
+        if val_loss < self.best_loss:
+            self.best_loss = val_loss
+            # torch.save(self.gpt.state_dict(), self.run_folder / "best.pth")
+
+    def train(self):
+        for epoch in range(self.config.epochs):
+            bar = tqdm.tqdm(self.train_loader)
+            for x, y in bar:
+                x, y = x.to(device), y.to(device)
+
+                # 1. get VQ-GAN quantized tokens
+                with torch.no_grad(): 
+                    _, quantized, _ = self.vqgan(x)
                 quantized = quantized.view(x.shape[0], -1)
-
                 B, T = quantized.shape
-                # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-                # quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
-                # print(quantized.shape)
-                # exit(0)
 
-
-                # tokens_x = quantized[:,:block_size]
-                # tokens_y = quantized[:,1:block_size+1]
-
-                # p_mask = torch.randint(0, 8, (B,1), device=device) * 32
-                # mask = torch.zeros((B, T), device=device).to(dtype=torch.int64)
-
-                # for b in range(B):
-                    # indices = torch.randperm(T, device=device)[:p_mask[b]]
-                    # mask[b, indices] = 1
-                    # print(torch.sum(mask[b,:]).item())
-                # tokens_x = mask * quantized + (1 - mask) * K
-
+                # 2. sample mask for each input
                 ratio = torch.rand((B,1), device=device)
-                gamma_r = gamma_func(ratio, gamma_mode)
+                gamma_r = gamma_func(ratio, self.config.schedule)
                 mask_count = (gamma_r * T).ceil().to(dtype=torch.int64)
-                # print("mask_count: ", mask_count)
 
                 mask = torch.zeros((B, T), device=device).to(dtype=torch.int64)
                 for b in range(B):
                     indices = torch.randperm(T, device=device)[:mask_count[b]]
                     mask[b, indices] = 1
-                tokens_x = mask * K + (1 - mask) * quantized
 
-                # mask = torch.bernoulli(p_keep * torch.ones(quantized.shape, device=device)).to(dtype=torch.int64)
-                # masked_input = torch.zeros_like(quantized)+K
-                # tokens_x = mask * quantized + (1 - mask) * masked_input
+                # 3. input & target tokens
+                tokens_x = mask * self.config.vqgan_config.K + (1 - mask) * quantized
+                tokens_y = quantized
 
-                logits, _ = gpt(tokens_x)
-                targets = quantized
-
-                B, T, C = logits.shape
-                logits = logits.view(B*T, C)
-                targets = targets.reshape(B*T)
-                loss = F.cross_entropy(logits, targets)
-
-                # tokens, loss = gpt(tokens_x, tokens_y)
-                bar.set_description(f"loss: {loss.item():.4f}")
-                wandb.log({"loss": loss.item()})
-
-                # print(f"{i=}, {loss.item()=}")
-
-                # scaler.scale(loss).backward()
-                # scaler.step(optim)
-                # scaler.update()
-
+                # 4. train
+                logits, _ = self.gpt(tokens_x)
+                loss = F.cross_entropy(logits.view(B*T, -1), tokens_y.reshape(B*T))
                 loss.backward()
-                optim.step()
-                optim.zero_grad()
+                self.optim.step()
+                self.optim.zero_grad()
 
-            if i % 1000 == 0:
-                generate_sample(run_folder / f"{epoch}.png")
-                wandb.log({"gen_sample": [wandb.Image(str(run_folder / f"{epoch}.png"))]})
+                # 5. log
+                bar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # bar = tqdm.tqdm(test_loader)
-        # val_loss, count = 0, 0
-        # with torch.no_grad():
-            # for i, (x, y) in enumerate(bar):
-                # x, y = x.to(device), y.to(device)
-                # _, quantized, _ = vqgan(x)
+                if self.steps % self.config.log_interval == 0:
+                    wandb.log({"train/loss": loss.item()})
 
-                # quantized = quantized.view(x.shape[0], -1)
-                # # quantized = torch.cat([y.view((-1,1))+K, quantized], dim=1)
-                # quantized = torch.cat([(y.view((-1,1))*0)+K, quantized], dim=1)
+                if self.steps % self.config.eval_interval == 0:
+                    self.evaluate()
+                    self.generate_samples(self.run_folder / f"{self.steps}.jpg")
+                    wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
+                    self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
+                    wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
+                self.steps += 1
 
-                # tokens_x = quantized[:,:block_size]
-                # tokens_y = quantized[:,1:block_size+1]
+    @torch.inference_mode()
+    def generate_samples(self, path):
+        context = torch.ones((16,256), dtype=torch.long, device=device)*self.config.vqgan_config.K
+        res = self.gpt.generate_maskgit(context, steps=8)
+        res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
+        images = denormalize(self.vqgan.decode(res))
+        grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy() * 255
+        grid_final = PIL.Image.fromarray(grid.astype("uint8"))
+        grid_final.save(path)
+    
+    @torch.inference_mode()
+    def generate_completions(self, path):
+        idxs = torch.randint(0, len(self.test_dataset), (4,))
+        images_gt = torch.stack([self.test_dataset[i][0] for i in idxs]).to(device)
 
-                # tokens, loss = gpt(tokens_x, tokens_y)
-                # val_loss += loss.item(); count += 1
+        with torch.inference_mode():
+            images_rec, quantized, _ = self.vqgan(images_gt.to(device))
+        quantized = quantized.view(images_gt.shape[0], -1)
+        B, T = quantized.shape
 
-                # bar.set_description(f"loss: {loss.item():.4f}")
-        # print("val_loss=", val_loss/count)
-        # wandb.log({"val_loss": val_loss/count, "epoch": epoch})
+        grid_gt = torchvision.utils.make_grid(denormalize(images_gt), nrow=4)
+        grid_rec = torchvision.utils.make_grid(denormalize(images_rec), nrow=4)
+        grids = [grid_gt, grid_rec]
+
+        # sample different masks
+        for mask_ratio in [0.15, 0.3, 0.5]:
+            mask_ratio = torch.ones((B,1), device=device) * mask_ratio
+            mask_count = (mask_ratio * T).ceil().to(dtype=torch.int64)
+            mask = torch.zeros((B, T), device=device).to(dtype=torch.int64)
+            for b in range(B):
+                indices = torch.randperm(T, device=device)[:mask_count[b]]
+                mask[b, indices] = 1
+            tokens_x = mask * self.config.vqgan_config.K + (1 - mask) * quantized
+            tokens_y = quantized
+            logits, _ = self.gpt(tokens_x)
+            probs = F.softmax(logits, dim=-1)
+            samples_vec = torch.ones((B, T), device=device, dtype=torch.int64)
+            for i in range(B):
+                samples_vec[i, :] = torch.multinomial(probs[i, :], num_samples=1).view(-1)
+            samples_vec[samples_vec >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
+            samples = samples_vec.view(B, 16, 16)
+            images_comp = denormalize(self.vqgan.decode(samples))
+            grids.append(torchvision.utils.make_grid(images_comp, nrow=4))
+
+        grid = torch.cat(grids, dim=1).permute(1, 2, 0).cpu().detach().numpy() * 255
+        grid = PIL.Image.fromarray(grid.astype("uint8"))
+        grid.save(path)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="mnist")
+    parser.add_argument("--lr", type=float, default=2.25e-6)
+    parser.add_argument("--batch_size", type=int, default=16)
+    args = parser.parse_args()
+
+    vqgan_config = VQGANConfig(K=1024, D=256)
+    gpt_config = GPTConfig(
+            block_size=256, 
+            vocab_size=1025, 
+            n_embd=1024, 
+            n_head=16, 
+            n_layer=24,
+            causal=False,
+    ) 
+    # vqgan_path = "runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth"
+    # vqgan_path = f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth"
+    vqgan_path = f"runs_vqgan/vqgan-bird-1726056084/best.pth"
+    train_config = TrainMaskGITConfig(
+            gpt_config=gpt_config, 
+            vqgan_config=vqgan_config, 
+            vqgan_path=vqgan_path, 
+            dataset=args.dataset, 
+            lr=args.lr, 
+            batch_size=args.batch_size
+    )
+    train_maskgit = TrainMaskGIT(train_config)
+    train_maskgit.train()

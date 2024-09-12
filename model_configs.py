@@ -73,9 +73,9 @@ def make_flower_loader(bs):
 
 def make_imagenet_loader(bs):
     path_to_imagenet='/mnt/data/Public_datasets/imagenet/imagenet_pytorch'
-    train_sz, test_sz = 100_000, 10_000
-    train_set = datasets.ImageNet(root=path_to_imagenet, split='train', transform=imagenet_trans)
-    test_set = datasets.ImageNet(root=path_to_imagenet, split='val', transform=imagenet_trans)
+    train_sz, test_sz = 200_000, 20_000
+    train_set = datasets.ImageNet(root=path_to_imagenet, split='train', transform=pil_transforms)
+    test_set = datasets.ImageNet(root=path_to_imagenet, split='val', transform=pil_transforms)
     train_set, _ = torch.utils.data.random_split(train_set, [train_sz, len(train_set)-train_sz])
     test_set, _ = torch.utils.data.random_split(test_set, [test_sz, len(test_set)-test_sz])
     return make_loader(train_set, bs=bs, shuffle=True), make_loader(test_set, bs=bs, shuffle=False)

@@ -198,10 +198,6 @@ class GPTLanguageModel(nn.Module):
 
                 samples_vec = torch.ones((B, T), device=probs.device, dtype=torch.int64)
 
-
-                # def gamma_func(r):
-                    # return 256 // r
-
                 # we have a [B, 256, 2048] tensor of probabilities
                 # then we get [B, 256] tensor of sampled indices
                 # we want to then get the [B, 256] tensor of probabilities for those indices
