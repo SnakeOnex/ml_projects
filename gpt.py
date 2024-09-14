@@ -187,7 +187,6 @@ class GPTLanguageModel(nn.Module):
         output = torch.zeros_like(init)+init
         with torch.no_grad():
             for step in range(steps):
-                print("pre: ", torch.sum(mask[0,:]))
                 logits, _ = self(output)
                 probs = F.softmax(logits, dim=-1)
                 B, T, C = probs.shape
@@ -198,27 +197,18 @@ class GPTLanguageModel(nn.Module):
 
                 samples_vec = torch.ones((B, T), device=probs.device, dtype=torch.int64)
 
-                # we have a [B, 256, 2048] tensor of probabilities
-                # then we get [B, 256] tensor of sampled indices
-                # we want to then get the [B, 256] tensor of probabilities for those indices
-
                 for i in range(B):
                     samples_vec[i, :] = torch.multinomial(probs[i, :], num_samples=1).view(-1)
 
                 sampled_probs = probs[torch.arange(B).view(-1, 1), torch.arange(T).view(1, -1), samples_vec]
-                print("sampled_probs: ", sampled_probs.shape)
-                print(sampled_probs[0, :10])
 
                 sampled_probs[(1-mask)] = 0. # mask out the already sampled tokens
                 sorted_probs = torch.argsort(sampled_probs, dim=-1, descending=True)
-
-                print("highest probs: ", sampled_probs[0, sorted_probs[0, :10]])
 
                 # unmask the top gamma_func(steps) tokens (for each example in the batch)
                 top_k = sorted_probs[:, :gamma_func(steps, mode='square')]
                 mask[torch.arange(B).view(-1, 1), top_k] = 0
                 output[torch.arange(B).view(-1, 1), top_k] = samples_vec[torch.arange(B).view(-1, 1), top_k]
-                print("post: ", torch.sum(mask[0,:]))
         self.train()
 
         return output

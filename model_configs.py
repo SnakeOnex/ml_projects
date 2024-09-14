@@ -5,15 +5,19 @@ from torchvision.transforms import v2
 from torchvision.io import read_image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
+from torch.utils.data.distributed import DistributedSampler
 
-def make_loader(dataset, bs, shuffle, num_workers=2):
+def make_loader(dataset, bs, shuffle, num_workers=1):
+    # import distributes sampler
     return DataLoader(
             dataset, 
             batch_size=bs, 
-            shuffle=shuffle, 
+            shuffle=False, 
             num_workers=num_workers,
             pin_memory=True,
-            drop_last=True)
+            drop_last=True,
+            # sampler=None if ddp is None else DistributedSampler(dataset))
+            sampler=DistributedSampler(dataset),)
 
 image_transforms = transforms.Compose([
     v2.Resize(256),
