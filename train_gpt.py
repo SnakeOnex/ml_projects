@@ -154,6 +154,7 @@ class TrainGPT:
         images_comp = denormalize(self.vqgan.decode(res))
         images_gt = denormalize(images_gt)
         images_rec = denormalize(images_rec)
+        print('Generating completions')
 
         grid_gt = torchvision.utils.make_grid(images_gt, nrow=4)
         grid_rec = torchvision.utils.make_grid(images_rec, nrow=4)

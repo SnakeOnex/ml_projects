@@ -11,9 +11,6 @@ from dataclasses import dataclass, field
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-# device = torch.device(get_free_gpu())
-# print("selected device: ", device)
-
 def gamma_func(ratio, mode):
     if mode == "linear":
         return 1 - ratio
@@ -26,39 +23,39 @@ class TrainMaskGITConfig:
     vqgan_path: str
     vqgan_config: VQGANConfig = field(default_factory=lambda: VQGANConfig(K=1024, D=256))
     dataset: str = "flower"
-    batch_size: int = 16
+    batch_size: int = 128
     epochs: int = 1000
     lr: float = 4e-5
     schedule: str = "square"
     betas: tuple = (0.5, 0.9)
     log_interval: int = 10
     eval_interval: int = 150
-    ddp: bool = False
+    multi_gpu: bool = False
 
 class TrainMaskGIT:
     def __init__(self, config: TrainMaskGITConfig):
-        self.master_process = torch.distributed.get_rank() == 0
-        self.local_rank = int(os.environ["LOCAL_RANK"])
-        self.device = int(os.environ["LOCAL_RANK"])
-        print(f"Master process: {self.master_process}")
-        device = self.device
         self.config = config
+        self.master_process = torch.distributed.get_rank() == 0 if self.config.multi_gpu else True
+        self.local_rank = int(os.environ["LOCAL_RANK"]) if self.config.multi_gpu else 0
+        self.device = int(os.environ["LOCAL_RANK"]) if self.config.multi_gpu else torch.device(get_free_gpu())
+        print(f"Master process: {self.master_process}")
 
         # 1. init models
-        self.vqgan = VQGAN(config.vqgan_config).to(device).eval()
+        self.vqgan = VQGAN(self.config.vqgan_config).to(self.device).eval()
         self.vqgan.load_state_dict(torch.load(self.config.vqgan_path))
-        # self.vqgan = DDP(self.vqgan, device_ids=[self.local_rank]).module
 
-        # if self.config.ddp:
-        self.gpt = GPTLanguageModel(config.gpt_config).to(device)
-        self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
-        self.gpt_raw = self.gpt.module
+        self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
+        if self.config.multi_gpu:
+            self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
+            self.gpt_raw = self.gpt.module
+        else:
+            self.gpt_raw = self.gpt
 
         # 2. optimizers
         self.optim = self.configure_optimizers()
 
         # 3. dataset
-        self.train_loader, self.test_loader = dataset_loaders[self.config.dataset](self.config.batch_size)
+        self.train_loader, self.test_loader = dataset_loaders[self.config.dataset](self.config.batch_size, self.config.multi_gpu)
         self.train_dataset, self.test_dataset = self.train_loader.dataset, self.test_loader.dataset
 
         # 4. run folder
@@ -90,7 +87,6 @@ class TrainMaskGIT:
 
     @torch.no_grad()
     def evaluate(self):
-        print(f"{self.local_rank=}: evaluating...")
         val_loss = torch.tensor(0.0, device=self.device)
         bar = tqdm.tqdm(self.test_loader, desc="eval") if self.master_process else self.test_loader
         for x, y in bar:
@@ -113,9 +109,10 @@ class TrainMaskGIT:
             if self.master_process: bar.set_postfix(loss=f"{loss.item():.4f}")
             val_loss += loss
 
-        torch.distributed.all_reduce(val_loss)
+        if self.config.multi_gpu:
+            torch.distributed.all_reduce(val_loss)
+            val_loss /= torch.distributed.get_world_size()
         val_loss /= len(self.test_loader)
-        val_loss /= torch.distributed.get_world_size()
 
         if self.master_process:
             wandb.log({"val/loss": val_loss.item()})
@@ -124,10 +121,8 @@ class TrainMaskGIT:
                 # torch.save(self.gpt.state_dict(), self.run_folder / "best.pth")
 
     def train(self):
-        print(f"{self.local_rank=}: starting training...")
-
         for epoch in range(self.config.epochs):
-            self.train_loader.sampler.set_epoch(epoch)
+            if self.config.multi_gpu: self.train_loader.sampler.set_epoch
             bar = tqdm.tqdm(self.train_loader) if self.master_process else self.train_loader
             for x, y in bar:
                 x, y = x.to(self.device), y.to(self.device)
@@ -159,8 +154,9 @@ class TrainMaskGIT:
                 self.optim.step()
                 self.optim.zero_grad()
 
-                torch.distributed.all_reduce(loss)
-                loss = loss / torch.distributed.get_world_size()
+                if self.config.multi_gpu:
+                    torch.distributed.all_reduce(loss)
+                    loss = loss / torch.distributed.get_world_size()
                 # 5. log
                 if self.master_process:
                     bar.set_postfix(loss=f"{loss.item():.4f}")
@@ -229,17 +225,15 @@ class TrainMaskGIT:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--ddp", action="store_true")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
 
-    # torch.backends.cudnn.enable = False
-    # torch.backends.cudnn.deterministic = True
-
-    if args.ddp:
+    if args.multi_gpu:
         init_process_group(backend="nccl")
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    else:
+        device = torch.device(get_free_gpu())
 
     vqgan_config = VQGANConfig(K=1024, D=256)
     gpt_config = GPTConfig(
@@ -247,9 +241,9 @@ if __name__ == "__main__":
             vocab_size=1025, 
             n_embd=1024, 
             n_head=16, 
-            n_layer=4,
+            n_layer=24,
             causal=False,
-            dropout=0.1
+            dropout=0.0
     ) 
     # vqgan_path = "runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth"
     # vqgan_path = f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth"
@@ -261,8 +255,11 @@ if __name__ == "__main__":
             dataset=args.dataset, 
             lr=args.lr, 
             batch_size=args.batch_size,
-            ddp=args.ddp
+            multi_gpu=args.multi_gpu
     )
+
+    if args.multi_gpu: print(f"bs={train_config.batch_size*torch.distributed.get_world_size()}, per_gpu_bs={train_config.batch_size}")
+    else: print(f"bs={train_config.batch_size}")
 
     train_maskgit = TrainMaskGIT(train_config)
     train_maskgit.train()

@@ -1,8 +1,8 @@
 #!/bin/sh
-#SBATCH --time 2-23:59:00
+#SBATCH --time 23:59:00
 #SBATCH -n 8
-#SBATCH --partition=amdgpulong
-#SBATCH --gres=gpu:1
+#SBATCH --partition=amdgpu
+#SBATCH --gres=gpu:4
 #BATCH --exclusive
 /bin/hostname
 nvidia-smi
@@ -18,6 +18,7 @@ ml load matplotlib/3.8.2-gfbf-2023b
 ml load PyTorch-Lightning/2.4.0-foss-2023b-CUDA-12.4.0
 ml load tqdm/4.66.2-GCCcore-13.2.0
 python -m wandb online
-python train_vqgan.py --dataset imagenet
+#python train_vqgan.py --dataset imagenet
 #python train_gpt.py --dataset bird
-#python train_maskgit.py --dataset imagenet
+#python train_maskgit.py --dataset bird
+torchrun --standalone --nproc_per_node=4 train_maskgit.py --dataset bird --multi_gpu
