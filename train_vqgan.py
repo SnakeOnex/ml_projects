@@ -115,6 +115,8 @@ class TrainVQGAN:
         if self.best_loss > val_l/cnt:
             self.best_loss = val_l/cnt
             torch.save(self.vqgan.state_dict(), self.run_folder / "best.pth")
+        if self.steps % 1000 == 0:
+            torch.save(self.vqgan.state_dict(), self.run_folder / f"model_{self.steps}.pth")
 
     def train(self):
         for epoch in range(self.config.epochs):

@@ -1,7 +1,6 @@
 import argparse, time, tqdm, PIL, wandb, numpy as np, os
 import torch, torch.nn as nn, torchvision, torch.nn.functional as F
 from pathlib import Path
-from torch.utils.data import DataLoader
 from vqgan import VQGAN, VQGANConfig
 from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
@@ -38,11 +37,10 @@ class TrainMaskGIT:
         self.master_process = torch.distributed.get_rank() == 0 if self.config.multi_gpu else True
         self.local_rank = int(os.environ["LOCAL_RANK"]) if self.config.multi_gpu else 0
         self.device = int(os.environ["LOCAL_RANK"]) if self.config.multi_gpu else torch.device(get_free_gpu())
-        print(f"Master process: {self.master_process}")
 
         # 1. init models
         self.vqgan = VQGAN(self.config.vqgan_config).to(self.device).eval()
-        self.vqgan.load_state_dict(torch.load(self.config.vqgan_path))
+        self.vqgan.load_state_dict(torch.load(self.config.vqgan_path, weights_only=True))
 
         self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
         if self.config.multi_gpu:
@@ -118,7 +116,7 @@ class TrainMaskGIT:
             wandb.log({"val/loss": val_loss.item()})
             if val_loss < self.best_loss:
                 self.best_loss = val_loss
-                # torch.save(self.gpt.state_dict(), self.run_folder / "best.pth")
+                if self.steps > 3_000: torch.save(self.gpt.state_dict(), self.run_folder / "best.pth")
 
     def train(self):
         for epoch in range(self.config.epochs):
@@ -230,6 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
 
+
     if args.multi_gpu:
         init_process_group(backend="nccl")
     else:
@@ -245,15 +244,20 @@ if __name__ == "__main__":
             causal=False,
             dropout=0.0
     ) 
-    # vqgan_path = "runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth"
-    # vqgan_path = f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth"
-    vqgan_path = f"runs_vqgan/vqgan-bird-1726056084/best.pth"
+
+    if args.dataset == "imagenet":
+        vqgan_path = "runs_vqgan/vqgan-imagenet-1726089582/best.pth"
+    elif args.dataset == "flower":
+        vqgan_path = "runs_vqgan/vqgan-flower-1726089427/best.pth"
+    elif args.dataset == "bird":
+        vqgan_path = f"runs_vqgan/vqgan-bird-1726056084/best.pth"
+
     train_config = TrainMaskGITConfig(
             gpt_config=gpt_config, 
             vqgan_config=vqgan_config, 
             vqgan_path=vqgan_path, 
             dataset=args.dataset, 
-            lr=args.lr, 
+            lr=args.lr * torch.distributed.get_world_size() if args.multi_gpu else args.lr,
             batch_size=args.batch_size,
             multi_gpu=args.multi_gpu
     )
