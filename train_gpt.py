@@ -19,12 +19,14 @@ class TrainGPTConfig:
     vqgan_config: VQGANConfig = field(default_factory=lambda: VQGANConfig(K=1024, D=256))
     dataset: str = "flower"
     batch_size: int = 16
-    epochs: int = 1000
+    epochs: int = 100
     lr: float = 4e-5
+    warmup_steps: int = 1_000
     p_keep: float = 0.9
     betas: tuple = (0.5, 0.9)
     log_interval: int = 10
     eval_interval: int = 500
+    class_cond: bool = False
     multi_gpu: bool = False
 
 class TrainGPT:
@@ -36,7 +38,7 @@ class TrainGPT:
 
         # 1. init models
         self.vqgan = VQGAN(self.config.vqgan_config).to(self.device).eval()
-        self.vqgan.load_state_dict(torch.load(self.config.vqgan_path))
+        self.vqgan.load_state_dict(torch.load(self.config.vqgan_path, weights_only=True))
 
         self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
         if self.config.multi_gpu:
@@ -47,6 +49,9 @@ class TrainGPT:
 
         # 2. optimizers
         self.optim = self.configure_optimizers()
+        self.cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, 20_000)
+        self.warmup_sched = torch.optim.lr_scheduler.LambdaLR(self.optim, lambda s: min(self.config.lr, self.config.lr * s / self.config.warmup_steps))
+        self.lr_sched = torch.optim.lr_scheduler.SequentialLR(self.optim, [self.warmup_sched, self.cos_lr_sched], [self.config.warmup_steps])
 
         # 3. dataset
         self.train_loader, self.test_loader = dataset_loaders[self.config.dataset](self.config.batch_size, self.config.multi_gpu)
@@ -88,7 +93,10 @@ class TrainGPT:
             _, quantized, _ = self.vqgan(x)
             quantized = quantized.view(x.shape[0], -1)
 
-            image_tokens = torch.cat([(y.view((-1,1))*0)+self.config.vqgan_config.K, quantized], dim=1)
+            if self.config.class_cond:
+                image_tokens = torch.cat([y.view((-1,1))+self.config.vqgan_config.K, quantized], dim=1)
+            else:
+                image_tokens = torch.cat([(y.view((-1,1))*0)+self.config.vqgan_config.K, quantized], dim=1)
             tokens_x = image_tokens[:,:self.config.gpt_config.block_size]
             tokens_y = image_tokens[:,1:self.config.gpt_config.block_size+1]
             _, loss = self.gpt(tokens_x, tokens_y)
@@ -119,7 +127,10 @@ class TrainGPT:
                 quantized = quantized.view(x.shape[0], -1)
 
                 # 2. add sos / class token
-                image_tokens = torch.cat([(y.view((-1,1))*0)+self.config.vqgan_config.K, quantized], dim=1)
+                if self.config.class_cond:
+                    image_tokens = torch.cat([y.view((-1,1))+self.config.vqgan_config.K, quantized], dim=1)
+                else:
+                    image_tokens = torch.cat([(y.view((-1,1))*0)+self.config.vqgan_config.K, quantized], dim=1)
 
                 # 3. input & target tokens
                 tokens_x = image_tokens[:,:self.config.gpt_config.block_size]
@@ -134,7 +145,9 @@ class TrainGPT:
                 _, loss = self.gpt(tokens_x, tokens_y)
                 loss.backward()
                 self.optim.step()
+                self.lr_sched.step()
                 self.optim.zero_grad()
+
 
                 if self.config.multi_gpu:
                     torch.distributed.all_reduce(loss)
@@ -143,7 +156,10 @@ class TrainGPT:
                 if self.master_process:
                     bar.set_postfix(loss=f"{loss.item():.4f}")
                     if self.steps % self.config.log_interval == 0:
-                        wandb.log({"train/loss": loss.item()})
+                        wandb.log({"train/loss": loss.item(),
+                                   "lr": self.optim.param_groups[0]["lr"],
+                                   "steps": self.steps,
+                                   "epoch": epoch})
 
                 if self.steps % self.config.eval_interval == 0:
                     self.evaluate()
@@ -159,6 +175,7 @@ class TrainGPT:
     def compute_metrics(self):
         incep_score = InceptionScore(normalize=False).to(self.device)
         context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
+        if self.config.class_cond: context += 6 # set class to always be cock
         res = self.gpt_raw.generate(context, 256)[:,1:]
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
         images = (denormalize(self.vqgan.decode(res)) * 255).to(dtype=torch.uint8)
@@ -183,16 +200,18 @@ class TrainGPT:
     def generate_completions(self, path):
         idxs = torch.randint(0, len(self.test_dataset), (4,))
         images_gt = torch.stack([self.test_dataset[i][0] for i in idxs]).to(self.device)
+        cls_gt = torch.stack([torch.tensor(self.test_dataset[i][1]) for i in idxs]).to(self.device)
 
         with torch.inference_mode():
             images_rec, quantized, _ = self.vqgan(images_gt.to(self.device))
         quantized = quantized.view(images_gt.shape[0], -1)[:,:128]
-        image_tokens = torch.cat([torch.ones((images_gt.shape[0],1), device=self.device).to(torch.int64)*self.config.vqgan_config.K, quantized], dim=1)
+        cond_tokens = cls_gt.view((-1,1))+self.config.vqgan_config.K
+        image_tokens = torch.cat([cond_tokens, quantized], dim=1)
         res = self.gpt_raw.generate(image_tokens, 128)[:,1:]
+        res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
         images_comp = denormalize(self.vqgan.decode(res))
         images_gt = denormalize(images_gt)
         images_rec = denormalize(images_rec)
-        print('Generating completions')
 
         grid_gt = torchvision.utils.make_grid(images_gt, nrow=4)
         grid_rec = torchvision.utils.make_grid(images_rec, nrow=4)
@@ -215,7 +234,7 @@ if __name__ == "__main__":
     vqgan_config = VQGANConfig(K=1024, D=256)
     gpt_config = GPTConfig(
             block_size=256, 
-            vocab_size=1025, 
+            vocab_size=2048,
             n_embd=1024, 
             n_head=16, 
             n_layer=24,
@@ -237,6 +256,7 @@ if __name__ == "__main__":
             dataset=args.dataset, 
             lr=args.lr * torch.distributed.get_world_size() if args.multi_gpu else args.lr,
             batch_size=args.batch_size,
+            class_cond=True,
             multi_gpu=args.multi_gpu)
 
     if args.multi_gpu: print(f"bs={train_config.batch_size*torch.distributed.get_world_size()}, per_gpu_bs={train_config.batch_size}")

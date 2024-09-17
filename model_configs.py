@@ -65,7 +65,6 @@ def make_bird_loader(bs, ddp=False):
     test_set_sz = len(bird_dataset) - train_set_sz
     train_bird_set, test_bird_set = torch.utils.data.random_split(bird_dataset, [train_set_sz, test_set_sz])
     return make_loader(train_bird_set, bs=bs, shuffle=True, ddp=ddp), make_loader(test_bird_set, bs=bs, shuffle=False, ddp=ddp)
-
 def make_flower_loader(bs, ddp=False):
     flower_dataset = FlowerDataset(path='flowers', transform=image_transforms)
     train_set_sz = int(len(flower_dataset)*0.9)
@@ -75,7 +74,7 @@ def make_flower_loader(bs, ddp=False):
 
 def make_imagenet_loader(bs, ddp=False):
     path_to_imagenet='/mnt/data/Public_datasets/imagenet/imagenet_pytorch'
-    # train_sz, test_sz = 200_000, 20_000
+    # train_sz, test_sz = 1_000, 1_00
     train_set = datasets.ImageNet(root=path_to_imagenet, split='train', transform=pil_transforms)
     test_set = datasets.ImageNet(root=path_to_imagenet, split='val', transform=pil_transforms)
     # train_set, _ = torch.utils.data.random_split(train_set, [train_sz, len(train_set)-train_sz])
