@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --time 23:59:59
-#SBATCH -n 8
+#SBATCH -n 16
 #SBATCH --partition=amdgpu
 #SBATCH --gres=gpu:4
 #BATCH --exclusive
@@ -21,5 +21,5 @@ python -m wandb online
 #python train_vqgan.py --dataset flower
 #python train_gpt.py --dataset bird
 #python train_maskgit.py --dataset bird
-torchrun --standalone --nproc_per_node=2 train_maskgit.py --dataset bird --multi_gpu
+torchrun --standalone --nproc_per_node=4 train_gpt.py --dataset imagenet --multi_gpu
 #torchrun --standalone --nproc_per_node=4 train_maskgit.py --dataset imagenet --multi_gpu

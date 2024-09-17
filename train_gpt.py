@@ -6,6 +6,8 @@ from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
 from utils import get_free_gpu, denormalize
 from dataclasses import dataclass, field
+from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.inception import InceptionScore
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
@@ -57,7 +59,7 @@ class TrainGPT:
             self.run_folder.mkdir(exist_ok=True, parents=True)
             wandb.init(project="gpt-vqgan", name=run_name, config={**self.config.__dict__})
 
-        # 4. running variables
+        # 5. running variables
         self.steps = 0
         self.best_loss = float("inf")
 
@@ -145,21 +147,36 @@ class TrainGPT:
 
                 if self.steps % self.config.eval_interval == 0:
                     self.evaluate()
+                    images = self.compute_metrics()
                     if self.master_process:
-                        self.generate_samples(self.run_folder / f"{self.steps}.jpg")
+                        self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
                         wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
                         self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
                         wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
                 self.steps += 1
 
     @torch.inference_mode()
-    def generate_samples(self, path):
+    def compute_metrics(self):
+        incep_score = InceptionScore(normalize=False).to(self.device)
         context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
         res = self.gpt_raw.generate(context, 256)[:,1:]
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
-        images = denormalize(self.vqgan.decode(res))
-        grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy() * 255
-        grid_final = PIL.Image.fromarray(grid.astype("uint8"))
+        images = (denormalize(self.vqgan.decode(res)) * 255).to(dtype=torch.uint8)
+        incep_score.update(images)
+        incep_score_val = incep_score.compute()[0].item()
+        print(f"Inception score: {incep_score_val}")
+        if self.master_process: wandb.log({"val/inception_score": float(incep_score_val)})
+        return images # return images to not have to generate them again for visualization
+
+    @torch.inference_mode()
+    def generate_samples(self, path, images=None):
+        if images is None:
+            context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
+            res = self.gpt_raw.generate(context, 256)[:,1:]
+            res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
+            images = denormalize(self.vqgan.decode(res)).to(dtype=torch.uint8) * 255
+        grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy()
+        grid_final = PIL.Image.fromarray(grid)
         grid_final.save(path)
     
     @torch.inference_mode()
@@ -187,16 +204,13 @@ class TrainGPT:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
 
     if args.multi_gpu:
         init_process_group(backend="nccl")
-        print("MUTLI GPU")
-    else:
-        device = torch.device(get_free_gpu())
 
     vqgan_config = VQGANConfig(K=1024, D=256)
     gpt_config = GPTConfig(
@@ -206,17 +220,22 @@ if __name__ == "__main__":
             n_head=16, 
             n_layer=24,
             causal=True,
-            dropout=0.1,
+            dropout=0.0,
     )
-    # vqgan_path = "runs_vqgan/vqgan-imagenet-1725884613/imagenet_best.pth"
-    # vqgan_path = f"runs_vqgan/vqgan-flower-1725870990/flower_best.pth"
-    vqgan_path = f"runs_vqgan/vqgan-bird-1726056084/best.pth"
+
+    if args.dataset == "imagenet":
+        vqgan_path = "runs_vqgan/vqgan-imagenet-1726089582/best.pth"
+    elif args.dataset == "flower":
+        vqgan_path = "runs_vqgan/vqgan-flower-1726089427/best.pth"
+    elif args.dataset == "bird":
+        vqgan_path = f"runs_vqgan/vqgan-bird-1726056084/best.pth"
+
     train_config = TrainGPTConfig(
             gpt_config=gpt_config, 
             vqgan_config=vqgan_config, 
             vqgan_path=vqgan_path, 
             dataset=args.dataset, 
-            lr=args.lr, 
+            lr=args.lr * torch.distributed.get_world_size() if args.multi_gpu else args.lr,
             batch_size=args.batch_size,
             multi_gpu=args.multi_gpu)
 
@@ -225,3 +244,5 @@ if __name__ == "__main__":
 
     trainer = TrainGPT(train_config)
     trainer.train()
+    destroy_process_group()
+

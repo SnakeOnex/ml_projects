@@ -223,7 +223,7 @@ class TrainMaskGIT:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
@@ -231,13 +231,11 @@ if __name__ == "__main__":
 
     if args.multi_gpu:
         init_process_group(backend="nccl")
-    else:
-        device = torch.device(get_free_gpu())
 
     vqgan_config = VQGANConfig(K=1024, D=256)
     gpt_config = GPTConfig(
             block_size=256, 
-            vocab_size=1025, 
+            vocab_size=1040, # 1024 + class token + padding
             n_embd=1024, 
             n_head=16, 
             n_layer=24,
@@ -268,4 +266,3 @@ if __name__ == "__main__":
     train_maskgit = TrainMaskGIT(train_config)
     train_maskgit.train()
     destroy_process_group()
-
