@@ -1,5 +1,7 @@
+import time
 import torch, torch.nn as nn, torch.nn.functional as F
 from dataclasses import dataclass
+from tqdm import trange
 
 @dataclass
 class GPTConfig:
@@ -163,9 +165,13 @@ class GPTLanguageModel(nn.Module):
 
         return logits, loss
 
-    def generate(self, idx, max_new_tokens):
+    def generate(self, idx, token_count, verbose=False):
         # idx is (B, T) array of indices in the current context
-        for i in range(max_new_tokens):
+        if verbose:
+            print(f"Generating {token_count} tokens with bs={idx.shape[0]}")
+            st = time.time()
+
+        for i in trange(token_count, desc='Generating tokens', disable=not verbose):
             # crop idx to the last block_size tokens
             idx_cond = idx[:, -self.config.block_size:]
             # get the predictions
@@ -178,6 +184,12 @@ class GPTLanguageModel(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+
+        if verbose:
+            dur = time.time()-st
+            print(f"Generation took {dur:.2f} seconds")
+            print(f"tokens per second: {token_count/dur:.2f}")
+
         return idx
 
     def generate_maskgit(self, init, steps=1):
