@@ -83,7 +83,7 @@ class FeedFoward(nn.Module):
         self.config = config
         self.net = nn.Sequential(
             nn.Linear(self.config.n_embd, 4 * self.config.n_embd),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * self.config.n_embd, self.config.n_embd),
             nn.Dropout(self.config.dropout),
         )

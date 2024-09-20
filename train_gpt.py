@@ -19,13 +19,16 @@ class TrainGPTConfig:
     vqgan_config: VQGANConfig = field(default_factory=lambda: VQGANConfig(K=1024, D=256))
     dataset: str = "flower"
     batch_size: int = 16
+    per_gpu_bs: int = 16
+    accum_steps: int = 1
     epochs: int = 100
-    lr: float = 4e-5
-    warmup_steps: int = 1_000
+    lr: float = 6e-5
+    warmup_steps: int = 2_000
+    max_steps: int = 250_000
     p_keep: float = 0.9
-    betas: tuple = (0.5, 0.9)
+    betas: tuple = (0.9, 0.99)
     log_interval: int = 10
-    eval_interval: int = 500
+    eval_interval: int = 1000
     class_cond: bool = False
     multi_gpu: bool = False
 
@@ -49,12 +52,12 @@ class TrainGPT:
 
         # 2. optimizers
         self.optim = self.configure_optimizers()
-        self.cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, 20_000)
-        self.warmup_sched = torch.optim.lr_scheduler.LambdaLR(self.optim, lambda s: min(self.config.lr, self.config.lr * s / self.config.warmup_steps))
+        self.cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, self.config.max_steps)
+        self.warmup_sched = torch.optim.lr_scheduler.LambdaLR(self.optim, lambda s: min(1, s / self.config.warmup_steps))
         self.lr_sched = torch.optim.lr_scheduler.SequentialLR(self.optim, [self.warmup_sched, self.cos_lr_sched], [self.config.warmup_steps])
 
         # 3. dataset
-        self.train_loader, self.test_loader = dataset_loaders[self.config.dataset](self.config.batch_size, self.config.multi_gpu)
+        self.train_loader, self.test_loader = dataset_loaders[self.config.dataset](self.config.per_gpu_bs, self.config.multi_gpu)
         self.train_dataset, self.test_dataset = self.train_loader.dataset, self.test_loader.dataset
 
         # 4. run folder
@@ -118,7 +121,10 @@ class TrainGPT:
         for epoch in range(self.config.epochs):
             if self.config.multi_gpu: self.train_loader.sampler.set_epoch
             bar = tqdm.tqdm(self.train_loader) if self.master_process else self.train_loader
+            micro_step = 0
             for x, y in bar:
+                if micro_step == 0: st = time.time()
+                if self.config.multi_gpu: self.gpt.require_backward_grad_sync = micro_step == self.config.accum_steps-1
                 x, y = x.to(self.device), y.to(self.device)
 
                 # 1. get VQ-GAN quantized tokens
@@ -137,45 +143,51 @@ class TrainGPT:
                 tokens_y = image_tokens[:,1:self.config.gpt_config.block_size+1]
 
                 # 4. mask input tokens
-                mask = torch.bernoulli(self.config.p_keep * torch.ones(tokens_x.shape, device=self.device)).to(dtype=torch.int64)
-                random_indices = torch.randint_like(tokens_x, self.config.gpt_config.vocab_size)
-                tokens_x = mask * tokens_x + (1 - mask) * random_indices
+                if self.config.p_keep < 1.0:
+                    mask = torch.bernoulli(self.config.p_keep * torch.ones(tokens_x.shape, device=self.device)).to(dtype=torch.int64)
+                    random_indices = torch.randint_like(tokens_x, self.config.gpt_config.vocab_size)
+                    tokens_x = mask * tokens_x + (1 - mask) * random_indices
 
                 # 5. train
                 _, loss = self.gpt(tokens_x, tokens_y)
+                loss = loss / self.config.accum_steps
                 loss.backward()
+                micro_step += 1
+                if micro_step != self.config.accum_steps: continue
+                else: micro_step = 0
                 self.optim.step()
                 self.lr_sched.step()
                 self.optim.zero_grad()
-
 
                 if self.config.multi_gpu:
                     torch.distributed.all_reduce(loss)
                     loss = loss / torch.distributed.get_world_size()
                 # 6. log
                 if self.master_process:
-                    bar.set_postfix(loss=f"{loss.item():.4f}")
+                    bar.set_postfix(loss=f"{loss.item():.4f}", fps=f"{1/(time.time()-st):.2f}s")
                     if self.steps % self.config.log_interval == 0:
-                        wandb.log({"train/loss": loss.item(),
+                        wandb.log({"train/loss": loss.item() * self.config.accum_steps,
                                    "lr": self.optim.param_groups[0]["lr"],
                                    "steps": self.steps,
-                                   "epoch": epoch})
+                                   "epoch": epoch,
+                                   "step_time": time.time()-st})
 
-                if self.steps % self.config.eval_interval == 0:
+                if self.steps % self.config.eval_interval == 0 and self.steps > self.config.warmup_steps:
                     self.evaluate()
-                    images = self.compute_metrics()
-                    if self.master_process:
-                        self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
-                        wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
-                        self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
-                        wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
+                    if self.steps > self.config.warmup_steps * 30_000:
+                        images = self.compute_metrics()
+                        if self.master_process:
+                            self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
+                            wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
+                            self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
+                            wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
                 self.steps += 1
 
     @torch.inference_mode()
     def compute_metrics(self):
         incep_score = InceptionScore(normalize=False).to(self.device)
         context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
-        if self.config.class_cond: context += 6 # set class to always be cock
+        if self.config.class_cond: context += 7 # set class to always be cock
         res = self.gpt_raw.generate(context, 256)[:,1:]
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
         images = (denormalize(self.vqgan.decode(res)) * 255).to(dtype=torch.uint8)
@@ -223,23 +235,36 @@ class TrainGPT:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=5e-5)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
 
+    max_gpu_bs = 32
+
     if args.multi_gpu:
         init_process_group(backend="nccl")
+        assert args.batch_size % torch.distributed.get_world_size() == 0
+        per_gpu_bs = args.batch_size // torch.distributed.get_world_size()
+    else:
+        per_gpu_bs = args.batch_size
+
+    if per_gpu_bs > max_gpu_bs:
+        assert per_gpu_bs % max_gpu_bs == 0
+        accum_steps = per_gpu_bs // max_gpu_bs
+        per_gpu_bs = max_gpu_bs
+
+    print(f"bs={args.batch_size}, per_gpu_bs={per_gpu_bs}, accum_steps={accum_steps}")
 
     vqgan_config = VQGANConfig(K=1024, D=256)
     gpt_config = GPTConfig(
-            block_size=256, 
+            block_size=256,
             vocab_size=2048,
-            n_embd=1024, 
-            n_head=16, 
+            n_embd=1024,
+            n_head=16,
             n_layer=24,
             causal=True,
-            dropout=0.0,
+            dropout=0.1,
     )
 
     if args.dataset == "imagenet":
@@ -254,13 +279,13 @@ if __name__ == "__main__":
             vqgan_config=vqgan_config, 
             vqgan_path=vqgan_path, 
             dataset=args.dataset, 
-            lr=args.lr * torch.distributed.get_world_size() if args.multi_gpu else args.lr,
+            lr=args.lr,
             batch_size=args.batch_size,
+            per_gpu_bs=per_gpu_bs,
+            accum_steps=accum_steps,
+            p_keep=0.9,
             class_cond=True,
             multi_gpu=args.multi_gpu)
-
-    if args.multi_gpu: print(f"bs={train_config.batch_size*torch.distributed.get_world_size()}, per_gpu_bs={train_config.batch_size}")
-    else: print(f"bs={train_config.batch_size}")
 
     trainer = TrainGPT(train_config)
     trainer.train()

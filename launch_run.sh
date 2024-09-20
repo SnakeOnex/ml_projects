@@ -1,7 +1,7 @@
 #!/bin/sh
-#SBATCH --time 23:59:59
+#SBATCH --time 2-23:59:59
 #SBATCH -n 16
-#SBATCH --partition=amdgpu
+#SBATCH --partition=amdgpulong
 #SBATCH --gres=gpu:4
 #BATCH --exclusive
 /bin/hostname
