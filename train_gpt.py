@@ -4,6 +4,7 @@ from pathlib import Path
 from vqgan import VQGAN, VQGANConfig
 from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
+from gpt_llama import GPT_B
 from utils import get_free_gpu, denormalize
 from dataclasses import dataclass, field
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -23,10 +24,9 @@ class TrainGPTConfig:
     accum_steps: int = 1
     epochs: int = 100
     lr: float = 6e-5
-    warmup_steps: int = 2_000
-    max_steps: int = 250_000
-    p_keep: float = 0.9
-    betas: tuple = (0.9, 0.99)
+    warmup_steps: int = 1_000
+    max_steps: int = 200_000
+    betas: tuple = (0.9, 0.95)
     log_interval: int = 10
     eval_interval: int = 1000
     class_cond: bool = False
@@ -43,7 +43,9 @@ class TrainGPT:
         self.vqgan = VQGAN(self.config.vqgan_config).to(self.device).eval()
         self.vqgan.load_state_dict(torch.load(self.config.vqgan_path, weights_only=True))
 
-        self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
+        # self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
+        self.gpt = GPT_B().to(self.device)
+        # self.gpt.setup_caches(max_batch_size=16, max_seq_length=257, dtype=self.gpt.tok_embeddings.weight.dtype)
         if self.config.multi_gpu:
             self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
             self.gpt_raw = self.gpt.module
@@ -52,7 +54,7 @@ class TrainGPT:
 
         # 2. optimizers
         self.optim = self.configure_optimizers()
-        self.cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, self.config.max_steps)
+        self.cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, self.config.max_steps, eta_min=self.config.lr / 10)
         self.warmup_sched = torch.optim.lr_scheduler.LambdaLR(self.optim, lambda s: min(1, s / self.config.warmup_steps))
         self.lr_sched = torch.optim.lr_scheduler.SequentialLR(self.optim, [self.warmup_sched, self.cos_lr_sched], [self.config.warmup_steps])
 
@@ -72,20 +74,19 @@ class TrainGPT:
         self.best_loss = float("inf")
 
     def configure_optimizers(self):
-        decay, no_decay = set(), set()
-        whitelist_weight_modules = (nn.Linear, )
-        blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
-        for mn, m in self.gpt_raw.named_modules():
-            for pn, p in m.named_parameters():
-                fpn = f"{mn}.{pn}" if mn else pn
-                if pn.endswith("bias"): no_decay.add(fpn)
-                elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules): decay.add(fpn)
-                elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules): no_decay.add(fpn)
-        no_decay.add("position_embedding_table.weight")
+        # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.gpt_raw.named_parameters()}
-        optim_groups = [{"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": 0.01},
-                        {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0}]
-        return torch.optim.AdamW(optim_groups, lr=self.config.lr, betas=self.config.betas)
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': 0.05},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        return torch.optim.AdamW(optim_groups, lr=self.config.lr, betas=self.config.betas, weight_decay=0.05)
 
     @torch.no_grad()
     def evaluate(self):
@@ -94,15 +95,14 @@ class TrainGPT:
         for x, y in bar:
             x, y = x.to(self.device), y.to(self.device)
             _, quantized, _ = self.vqgan(x)
-            quantized = quantized.view(x.shape[0], -1)
-
-            if self.config.class_cond:
-                image_tokens = torch.cat([y.view((-1,1))+self.config.vqgan_config.K, quantized], dim=1)
-            else:
-                image_tokens = torch.cat([(y.view((-1,1))*0)+self.config.vqgan_config.K, quantized], dim=1)
-            tokens_x = image_tokens[:,:self.config.gpt_config.block_size]
-            tokens_y = image_tokens[:,1:self.config.gpt_config.block_size+1]
-            _, loss = self.gpt(tokens_x, tokens_y)
+            image_tokens = quantized.view(x.shape[0], -1) + 1000
+            tokens_x = image_tokens[:,0:self.config.gpt_config.block_size-1].clone()
+            cls_token = y.view((-1,)).clone()
+            tokens_y = image_tokens[:,0:self.config.gpt_config.block_size].clone()
+            _, loss = self.gpt(
+                    idx=tokens_x,
+                    cond_idx=cls_token,
+                    targets=tokens_y)
             if self.master_process: bar.set_postfix(loss=f"{loss.item():.4f}")
             val_loss += loss.item()
 
@@ -130,26 +130,19 @@ class TrainGPT:
                 # 1. get VQ-GAN quantized tokens
                 with torch.no_grad(): 
                     _, quantized, _ = self.vqgan(x)
-                quantized = quantized.view(x.shape[0], -1)
+                image_tokens = quantized.view(x.shape[0], -1) + 1000
 
                 # 2. add sos / class token
-                if self.config.class_cond:
-                    image_tokens = torch.cat([y.view((-1,1))+self.config.vqgan_config.K, quantized], dim=1)
-                else:
-                    image_tokens = torch.cat([(y.view((-1,1))*0)+self.config.vqgan_config.K, quantized], dim=1)
+                tokens_x = image_tokens[:,0:self.config.gpt_config.block_size-1].clone()
+                cls_token = y.view((-1,)).clone()
+                tokens_y = image_tokens[:,0:self.config.gpt_config.block_size].clone()
 
-                # 3. input & target tokens
-                tokens_x = image_tokens[:,:self.config.gpt_config.block_size]
-                tokens_y = image_tokens[:,1:self.config.gpt_config.block_size+1]
-
-                # 4. mask input tokens
-                if self.config.p_keep < 1.0:
-                    mask = torch.bernoulli(self.config.p_keep * torch.ones(tokens_x.shape, device=self.device)).to(dtype=torch.int64)
-                    random_indices = torch.randint_like(tokens_x, self.config.gpt_config.vocab_size)
-                    tokens_x = mask * tokens_x + (1 - mask) * random_indices
-
-                # 5. train
-                _, loss = self.gpt(tokens_x, tokens_y)
+                # 4. train
+                _, loss = self.gpt(
+                        idx=tokens_x,
+                        cond_idx=cls_token,
+                        targets=tokens_y)
+                            
                 loss = loss / self.config.accum_steps
                 loss.backward()
                 micro_step += 1
@@ -162,11 +155,12 @@ class TrainGPT:
                 if self.config.multi_gpu:
                     torch.distributed.all_reduce(loss)
                     loss = loss / torch.distributed.get_world_size()
-                # 6. log
+                # 5. log
                 if self.master_process:
+                    loss *= self.config.accum_steps
                     bar.set_postfix(loss=f"{loss.item():.4f}", fps=f"{1/(time.time()-st):.2f}s")
                     if self.steps % self.config.log_interval == 0:
-                        wandb.log({"train/loss": loss.item() * self.config.accum_steps,
+                        wandb.log({"train/loss": loss.item(),
                                    "lr": self.optim.param_groups[0]["lr"],
                                    "steps": self.steps,
                                    "epoch": epoch,
@@ -174,21 +168,27 @@ class TrainGPT:
 
                 if self.steps % self.config.eval_interval == 0 and self.steps > self.config.warmup_steps:
                     self.evaluate()
-                    if self.steps > self.config.warmup_steps * 30_000:
+                    if self.steps > self.config.warmup_steps * 5_000:
                         images = self.compute_metrics()
                         if self.master_process:
                             self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
                             wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
-                            self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
-                            wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
+                            # self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
+                            # wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
                 self.steps += 1
 
     @torch.inference_mode()
     def compute_metrics(self):
+        inference_gpt = GPT_B().to(self.device)
+        inference_gpt.load_state_dict(self.gpt.state_dict())
+        inference_gpt.eval()
+        with torch.device(self.device):
+            inference_gpt.setup_caches(max_batch_size=16, max_seq_length=256, dtype=inference_gpt.tok_embeddings.weight.dtype)
+
         incep_score = InceptionScore(normalize=False).to(self.device)
         context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
         if self.config.class_cond: context += 7 # set class to always be cock
-        res = self.gpt_raw.generate(context, 256)[:,1:]
+        res = inference_gpt.generate(context, 256)[:,1:]
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
         images = (denormalize(self.vqgan.decode(res)) * 255).to(dtype=torch.uint8)
         incep_score.update(images)
@@ -201,6 +201,7 @@ class TrainGPT:
     def generate_samples(self, path, images=None):
         if images is None:
             context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
+            self.gpt_raw.setup_caches(max_batch_size=16, max_seq_length=258, dtype=self.gpt_raw.tok_embeddings.weight.dtype)
             res = self.gpt_raw.generate(context, 256)[:,1:]
             res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
             images = denormalize(self.vqgan.decode(res)).to(dtype=torch.uint8) * 255
@@ -235,12 +236,13 @@ class TrainGPT:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
 
-    max_gpu_bs = 32
+    max_gpu_bs = 64
+    accum_steps = 1
 
     if args.multi_gpu:
         init_process_group(backend="nccl")
@@ -283,7 +285,6 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             per_gpu_bs=per_gpu_bs,
             accum_steps=accum_steps,
-            p_keep=0.9,
             class_cond=True,
             multi_gpu=args.multi_gpu)
 
