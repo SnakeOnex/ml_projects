@@ -76,7 +76,7 @@ class ModelArgs:
     class_dropout_prob: float = 0.1
     model_type: str = 'c2i'
 
-    vocab_size: int = 16384
+    vocab_size: int = 2048
     cls_token_num: int = 1
     block_size: int = 256
     max_batch_size: int = 32
@@ -422,12 +422,15 @@ class Transformer(nn.Module):
 
         for i in trange(token_count, desc='Generating tokens', disable=not verbose):
             # crop idx to the last block_size tokens
-            if i > 0:
-                idx = idx[:, -self.config.block_size:]
+            # if i > 0:
+                # idx = idx[:, -self.config.block_size:]
 
             # get the predictions
-            input_pos = torch.arange(0, i+1, device=idx.device)
-            logits, _ = self(idx=idx, cond_idx=None, input_pos=input_pos)
+            # input_pos = torch.arange(0, i+1, device=idx.device)
+            input_pos = torch.zeros(idx.shape[0], 1, dtype=torch.long, device=idx.device) + i
+            # logits, _ = self(idx=idx, cond_idx=None, input_pos=input_pos)
+            logits, _ = self(idx=idx[:,1:], cond_idx=idx[:,0], input_pos=input_pos)
+            print(logits.shape)
 
             # logits, _ = self(idx, cond_idx)
             # focus only on the last time step

@@ -4,7 +4,7 @@ from pathlib import Path
 from vqgan import VQGAN, VQGANConfig
 from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
-from gpt_llama import GPT_B
+from gpt_llama import GPT_B, GPT_L
 from utils import get_free_gpu, denormalize
 from dataclasses import dataclass, field
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -44,7 +44,7 @@ class TrainGPT:
         self.vqgan.load_state_dict(torch.load(self.config.vqgan_path, weights_only=True))
 
         # self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
-        self.gpt = GPT_B().to(self.device)
+        self.gpt = GPT_L().to(self.device)
         # self.gpt.setup_caches(max_batch_size=16, max_seq_length=257, dtype=self.gpt.tok_embeddings.weight.dtype)
         if self.config.multi_gpu:
             self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
@@ -95,7 +95,7 @@ class TrainGPT:
         for x, y in bar:
             x, y = x.to(self.device), y.to(self.device)
             _, quantized, _ = self.vqgan(x)
-            image_tokens = quantized.view(x.shape[0], -1) + 1000
+            image_tokens = quantized.view(x.shape[0], -1)
             tokens_x = image_tokens[:,0:self.config.gpt_config.block_size-1].clone()
             cls_token = y.view((-1,)).clone()
             tokens_y = image_tokens[:,0:self.config.gpt_config.block_size].clone()
@@ -130,7 +130,7 @@ class TrainGPT:
                 # 1. get VQ-GAN quantized tokens
                 with torch.no_grad(): 
                     _, quantized, _ = self.vqgan(x)
-                image_tokens = quantized.view(x.shape[0], -1) + 1000
+                image_tokens = quantized.view(x.shape[0], -1)
 
                 # 2. add sos / class token
                 tokens_x = image_tokens[:,0:self.config.gpt_config.block_size-1].clone()
@@ -166,30 +166,31 @@ class TrainGPT:
                                    "epoch": epoch,
                                    "step_time": time.time()-st})
 
-                if self.steps % self.config.eval_interval == 0 and self.steps > self.config.warmup_steps:
+                if self.steps % self.config.eval_interval == 0 and self.steps >= self.config.warmup_steps:
                     self.evaluate()
-                    if self.steps > self.config.warmup_steps * 5_000:
-                        images = self.compute_metrics()
-                        if self.master_process:
-                            self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
-                            wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
-                            # self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
-                            # wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
+                    images = self.compute_metrics()
+                    if self.master_process:
+                        self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
+                        wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
+                        # self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
+                        # wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
                 self.steps += 1
 
     @torch.inference_mode()
     def compute_metrics(self):
-        inference_gpt = GPT_B().to(self.device)
-        inference_gpt.load_state_dict(self.gpt.state_dict())
-        inference_gpt.eval()
-        with torch.device(self.device):
-            inference_gpt.setup_caches(max_batch_size=16, max_seq_length=256, dtype=inference_gpt.tok_embeddings.weight.dtype)
+        # inference_gpt = GPT_B().to(self.device)
+        # inference_gpt.load_state_dict(self.gpt_raw.state_dict())
+        # inference_gpt.eval()
+        # with torch.device(self.device):
+            # inference_gpt.setup_caches(max_batch_size=16, max_seq_length=256, dtype=inference_gpt.tok_embeddings.weight.dtype)
 
+        inference_gpt = self.gpt_raw
         incep_score = InceptionScore(normalize=False).to(self.device)
-        context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
+        context = torch.zeros((16,1), dtype=torch.long, device=self.device)
         if self.config.class_cond: context += 7 # set class to always be cock
         res = inference_gpt.generate(context, 256)[:,1:]
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
+        res[res < 0] = 0
         images = (denormalize(self.vqgan.decode(res)) * 255).to(dtype=torch.uint8)
         incep_score.update(images)
         incep_score_val = incep_score.compute()[0].item()
@@ -202,8 +203,9 @@ class TrainGPT:
         if images is None:
             context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
             self.gpt_raw.setup_caches(max_batch_size=16, max_seq_length=258, dtype=self.gpt_raw.tok_embeddings.weight.dtype)
-            res = self.gpt_raw.generate(context, 256)[:,1:]
+            res = self.gpt_raw.generate(context, 256)[:,1:] - 1000
             res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
+            res[res < 0] = 0
             images = denormalize(self.vqgan.decode(res)).to(dtype=torch.uint8) * 255
         grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy()
         grid_final = PIL.Image.fromarray(grid)
@@ -218,10 +220,11 @@ class TrainGPT:
         with torch.inference_mode():
             images_rec, quantized, _ = self.vqgan(images_gt.to(self.device))
         quantized = quantized.view(images_gt.shape[0], -1)[:,:128]
-        cond_tokens = cls_gt.view((-1,1))+self.config.vqgan_config.K
+        cond_tokens = cls_gt.view((-1,1))
         image_tokens = torch.cat([cond_tokens, quantized], dim=1)
-        res = self.gpt_raw.generate(image_tokens, 128)[:,1:]
+        res = self.gpt_raw.generate(image_tokens, 128)[:,1:] - 1000
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
+        res[res < 0] = 0
         images_comp = denormalize(self.vqgan.decode(res))
         images_gt = denormalize(images_gt)
         images_rec = denormalize(images_rec)
@@ -236,12 +239,12 @@ class TrainGPT:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--multi_gpu", action="store_true")
     args = parser.parse_args()
 
-    max_gpu_bs = 64
+    max_gpu_bs = 32
     accum_steps = 1
 
     if args.multi_gpu:
