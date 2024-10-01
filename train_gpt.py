@@ -4,7 +4,7 @@ from pathlib import Path
 from vqgan import VQGAN, VQGANConfig
 from model_configs import dataset_loaders
 from gpt import GPTLanguageModel, GPTConfig
-from gpt_llama import GPT_B, GPT_L
+from gpt_llama import GPT_B, GPT_L, GPT_XL
 from utils import get_free_gpu, denormalize
 from dataclasses import dataclass, field
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -24,13 +24,16 @@ class TrainGPTConfig:
     accum_steps: int = 1
     epochs: int = 100
     lr: float = 6e-5
-    warmup_steps: int = 1_000
+    warmup_steps: int = 5_000
     max_steps: int = 200_000
     betas: tuple = (0.9, 0.95)
     log_interval: int = 10
-    eval_interval: int = 1000
+    eval_interval: int = 2000
     class_cond: bool = False
     multi_gpu: bool = False
+
+    def tokens_per_batch(self):
+        return self.per_gpu_bs * self.gpt_config.block_size * (torch.distributed.get_world_size() if self.multi_gpu else 1)
 
 class TrainGPT:
     def __init__(self, config: TrainGPTConfig):
@@ -48,6 +51,7 @@ class TrainGPT:
         # self.gpt.setup_caches(max_batch_size=16, max_seq_length=257, dtype=self.gpt.tok_embeddings.weight.dtype)
         if self.config.multi_gpu:
             self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
+            self.gpt.load_state_dict(torch.load("runs_gpt/gpt-imagenet-1727429496/best.pth"))
             self.gpt_raw = self.gpt.module
         else:
             self.gpt_raw = self.gpt
@@ -115,7 +119,7 @@ class TrainGPT:
             wandb.log({"val/loss": val_loss})
             if val_loss < self.best_loss:
                 self.best_loss = val_loss
-                # torch.save(self.gpt.state_dict(), self.run_folder / "best.pth")
+                torch.save(self.gpt.state_dict(), self.run_folder / "best.pth")
 
     def train(self):
         for epoch in range(self.config.epochs):
@@ -164,7 +168,8 @@ class TrainGPT:
                                    "lr": self.optim.param_groups[0]["lr"],
                                    "steps": self.steps,
                                    "epoch": epoch,
-                                   "step_time": time.time()-st})
+                                   "step_time": time.time()-st,
+                                   "tokens_per_second": self.config.tokens_per_batch() / (time.time()-st)})
 
                 if self.steps % self.config.eval_interval == 0 and self.steps >= self.config.warmup_steps:
                     self.evaluate()
@@ -172,8 +177,8 @@ class TrainGPT:
                     if self.master_process:
                         self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
                         wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
-                        # self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
-                        # wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
+                        self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
+                        wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
                 self.steps += 1
 
     @torch.inference_mode()
@@ -202,10 +207,7 @@ class TrainGPT:
     def generate_samples(self, path, images=None):
         if images is None:
             context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
-            self.gpt_raw.setup_caches(max_batch_size=16, max_seq_length=258, dtype=self.gpt_raw.tok_embeddings.weight.dtype)
-            res = self.gpt_raw.generate(context, 256)[:,1:] - 1000
-            res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
-            res[res < 0] = 0
+            self.gpt_raw.setup_caches(max_batch_size=16, max_seq_length=258, dtype=self.gpt_raw.tok_embeddings.weight.dtype) res = self.gpt_raw.generate(context, 256)[:,1:] - 1000 res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1 res[res < 0] = 0
             images = denormalize(self.vqgan.decode(res)).to(dtype=torch.uint8) * 255
         grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy()
         grid_final = PIL.Image.fromarray(grid)
@@ -222,7 +224,7 @@ class TrainGPT:
         quantized = quantized.view(images_gt.shape[0], -1)[:,:128]
         cond_tokens = cls_gt.view((-1,1))
         image_tokens = torch.cat([cond_tokens, quantized], dim=1)
-        res = self.gpt_raw.generate(image_tokens, 128)[:,1:] - 1000
+        res = self.gpt_raw.generate(image_tokens, 128)[:,1:]
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
         res[res < 0] = 0
         images_comp = denormalize(self.vqgan.decode(res))

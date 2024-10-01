@@ -10,7 +10,6 @@ from typing import Optional, List
 from tqdm import trange
 import time
 
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -382,12 +381,13 @@ class Transformer(nn.Module):
                 token_embeddings = self.cls_embedding(cond_idx, train=self.training)[:,:self.cls_token_num]
             else: # decode_n_tokens(kv cache) in inference
                 token_embeddings = self.tok_embeddings(idx)
+
             
             bs = token_embeddings.shape[0]
             mask = self.causal_mask[:bs, None, input_pos]
             h = self.tok_dropout(token_embeddings)
             self.freqs_cis = self.freqs_cis
-        
+
         if self.training:
             freqs_cis = self.freqs_cis[:token_embeddings.shape[1]]
         else:
@@ -414,7 +414,7 @@ class Transformer(nn.Module):
 
         return logits, loss
 
-    def generate(self, idx, token_count, verbose=False):
+    def generate(self, idx, token_count, cfg=False, verbose=False):
         # idx is (B, T) array of indices in the current context
         if verbose:
             # print(f"Generating {token_count} tokens with bs={idx.shape[0]}")
@@ -427,10 +427,15 @@ class Transformer(nn.Module):
 
             # get the predictions
             # input_pos = torch.arange(0, i+1, device=idx.device)
-            input_pos = torch.zeros(idx.shape[0], 1, dtype=torch.long, device=idx.device) + i
-            # logits, _ = self(idx=idx, cond_idx=None, input_pos=input_pos)
-            logits, _ = self(idx=idx[:,1:], cond_idx=idx[:,0], input_pos=input_pos)
-            print(logits.shape)
+            input_pos = torch.zeros(8, dtype=torch.long, device=idx.device) + i
+
+            # logits, _ = self(idx=idx[:,1:], cond_idx=idx[:,0], input_pos=input_pos)
+
+            if i == 0:
+                logits, _ = self(idx=None, cond_idx=idx, input_pos=input_pos)
+            else:
+                logits, _ = self(idx=idx, cond_idx=None, input_pos=input_pos)
+            # logits, _ = self(idx=idx[:,1:], cond_idx=idx[:,0], input_pos=input_pos)
 
             # logits, _ = self(idx, cond_idx)
             # focus only on the last time step
