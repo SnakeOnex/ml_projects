@@ -36,6 +36,14 @@ pil_transforms = transforms.Compose([
     v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
 ])
 
+pil_transforms_no_augment = transforms.Compose([
+    v2.Resize(256),
+    v2.CenterCrop(256),
+    v2.PILToTensor(),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+])
+
 class BirdDataset(Dataset):
     def __init__(self, path, transform=None):
         self.transform = transform

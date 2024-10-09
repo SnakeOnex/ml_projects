@@ -1,4 +1,6 @@
 import torch, torch.nn as nn, torch.nn.functional as F, numpy as np
+from einops import rearrange, reduce
+from torch import einsum
 from dataclasses import dataclass
 
 @dataclass
@@ -81,6 +83,68 @@ class VQGAN(nn.Module):
         return disc_factor
 
     def load_checkpoint(self, path):
+        self.load_state_dict(torch.load(path, weight_only=True))
+
+class VQGAN_LFG(nn.Module):
+    def __init__(self, args: VQGANConfig):
+        super(VQGAN_LFG, self).__init__()
+        self.encoder = Encoder(double_z=False, z_channels=256, resolution=256, in_channels=3, out_ch=3, ch=128,
+                               ch_mult=[1, 1, 2, 2, 4], num_res_blocks=2, attn_resolutions=[16], dropout=0.0)
+        self.decoder = Decoder(double_z=False, z_channels=256, resolution=256, in_channels=3, out_ch=3, ch=128,
+                               ch_mult=[1, 1, 2, 2, 4], num_res_blocks=2, attn_resolutions=[16], dropout=0.0)
+
+        self.codebook = CodebookLFG(args)
+        code_size = int(np.log2(args.num_codebook_vectors))
+        self.quant_conv = nn.Conv2d(args.latent_dim, code_size, 1)
+        self.post_quant_conv = nn.Conv2d(code_size, args.latent_dim, 1)
+
+    def forward(self, imgs):
+        encoded_images = self.encoder(imgs)
+        quant_conv_encoded_images = self.quant_conv(encoded_images)
+        quant_conv_encoded_images = F.normalize(quant_conv_encoded_images,dim=1)
+        codebook_mapping, codebook_indices, q_loss = self.codebook(quant_conv_encoded_images)
+        post_quant_conv_mapping = self.post_quant_conv(codebook_mapping)
+        decoded_images = self.decoder(post_quant_conv_mapping)
+
+        return decoded_images, codebook_indices, q_loss
+
+    def encode(self, imgs):
+        encoded_images = self.encoder(imgs)
+        quant_conv_encoded_images = self.quant_conv(encoded_images)
+        quant_conv_encoded_images = F.normalize(quant_conv_encoded_images, dim=1)
+        codebook_mapping, codebook_indices, q_loss = self.codebook(quant_conv_encoded_images)
+        return codebook_mapping, codebook_indices, q_loss
+
+    def decode(self, z):
+        # codebook_mapping = self.codebook.embedding(z)
+
+        mask = 2 ** torch.arange(10, device=z.device, dtype=torch.long)
+
+        indices = z
+        ix_to_vectors = self.codebook.embedding(indices).reshape(indices.shape[0], 16, 16, 256)
+        ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
+        post_quant_conv_mapping = self.post_quant_conv(ix_to_vectors)
+        # post_quant_conv_mapping = self.post_quant_conv(z)
+        decoded_images = self.decoder(post_quant_conv_mapping)
+        return decoded_images
+
+    def calculate_lambda(self, perceptual_loss, gan_loss):
+        last_layer = self.decoder.conv_out
+        last_layer_weight = last_layer.weight
+        perceptual_loss_grads = torch.autograd.grad(perceptual_loss, last_layer_weight, retain_graph=True)[0]
+        gan_loss_grads = torch.autograd.grad(gan_loss, last_layer_weight, retain_graph=True)[0]
+
+        lda = torch.norm(perceptual_loss_grads) / (torch.norm(gan_loss_grads) + 1e-4)
+        lda = torch.clamp(lda, 0, 1e4).detach()
+        return 0.8 * lda
+
+    @staticmethod
+    def adopt_weight(disc_factor, i, threshold, value=0.):
+        if i < threshold:
+            disc_factor = value
+        return disc_factor
+
+    def load_checkpoint(self, path):
         self.load_state_dict(torch.load(path))
 
 class Codebook(nn.Module):
@@ -112,6 +176,67 @@ class Codebook(nn.Module):
         z_q = z_q.permute(0, 3, 1, 2)
 
         return z_q, min_encoding_indices, loss
+
+class CodebookLFG(nn.Module):
+    def __init__(self, args):
+        super(CodebookLFG, self).__init__()
+        self.num_codebook_vectors = args.num_codebook_vectors
+        self.code_size = int(np.log2(self.num_codebook_vectors))
+
+        all_codes = torch.arange(self.num_codebook_vectors, device='cuda')
+        bits = self.indices_to_bits(all_codes.view(1,-1)).squeeze(0)
+        print(bits.shape)
+        self.codebook = bits * 2.0 - 1.0
+        print("codebook dim: ", self.codebook.shape)
+        # bits =
+    def forward(self, z):
+        # z = z.permute(0, 2, 3, 1).contiguous()
+        z = rearrange(z, 'b c h w -> b h w c')
+        # z_flattened = z.view(-1, self.code_size) # B x D
+        z_flattened = rearrange(z, 'b h w c -> b (h w) c')
+
+        # print(f"z: {z.shape}, z_flattened: {z_flattened.shape}")
+
+        z_q = torch.sign(z_flattened) # B x D (-1, 1)
+
+        # compute indices
+        mask = 2 ** torch.arange(self.code_size, device=z.device) # 1, 2, 4, 8, ..
+        # indices = torch.sum((z_q > 0).int() * mask.int(), dim=-1)
+        indices = (z_q > 0).int() * mask.int()
+        indices = reduce(indices, 'b t c -> b t', 'sum')
+
+        # print(f"z_q: {z_q.shape}, indices: {indices.shape}, {indices[0, :10]}")
+
+        # compute loss
+        commit_loss = torch.mean((z_q.detach() - z_flattened)**2)
+
+        ## compute entropy over the used indices
+        entropy_loss = 0
+        print(z.shape, z_flattened.shape, self.codebook.shape)
+
+        distance = -2 * einsum('... i d, j d -> ... i j', rearrange(z, 'b h w c -> b h w  c'), self.codebook)
+        print(distance.shape)
+        # bits = self.indices_to_bits(indices)
+        
+        exit(0)
+
+        loss = commit_loss + entropy_loss
+
+        z_q = z_flattened + (z_q - z_flattened).detach()
+        z_q = rearrange(z_q, 'b (h w) c -> b c h w', h=16, w=16)
+        # print(f"z_q: {z_q.shape}")
+        return z_q, indices, loss
+
+    def indices_to_bits(self, indices):
+        mask = 2 ** torch.arange(self.code_size, device=indices.device) # 1, 2, 4, 8, ..
+        # indices shape -> B x H x W
+        # mask shape -> code_size
+        # bits_shape -> B x H x W x code_size
+        indices = rearrange(indices, 'b t -> b t 1')
+        mask = rearrange(mask, 'd -> 1 1 d')
+        bits = (indices & mask) # bitwise and between index binary representation and mask
+        print(f"{indices.shape}, {mask.shape}, {bits.shape}")
+        return bits
 
 class Encoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
@@ -306,36 +431,6 @@ class Decoder(nn.Module):
         h = nonlinearity(h)
         h = self.conv_out(h)
         return h
-
-class Codebook(nn.Module):
-    def __init__(self, args):
-        super(Codebook, self).__init__()
-        self.num_codebook_vectors = args.num_codebook_vectors
-        self.latent_dim = args.latent_dim
-        self.beta = args.beta
-
-        self.embedding = nn.Embedding(self.num_codebook_vectors, self.latent_dim)
-        self.embedding.weight.data.uniform_(-1.0 / self.num_codebook_vectors, 1.0 / self.num_codebook_vectors)
-
-    def forward(self, z):
-        self.embedding.weight = torch.nn.Parameter(F.normalize(self.embedding.weight, dim=1))
-        z = z.permute(0, 2, 3, 1).contiguous()
-        z_flattened = z.view(-1, self.latent_dim)
-
-        d = torch.sum(z_flattened**2, dim=1, keepdim=True) + \
-            torch.sum(self.embedding.weight**2, dim=1) - \
-            2*(torch.matmul(z_flattened, self.embedding.weight.t()))
-
-        min_encoding_indices = torch.argmin(d, dim=1)
-        z_q = self.embedding(min_encoding_indices).view(z.shape)
-
-        loss = torch.mean((z_q.detach() - z)**2) + self.beta * torch.mean((z_q - z.detach())**2)
-
-        z_q = z + (z_q - z).detach()
-
-        z_q = z_q.permute(0, 3, 1, 2)
-
-        return z_q, min_encoding_indices, loss
 
 # swish
 def nonlinearity(x):

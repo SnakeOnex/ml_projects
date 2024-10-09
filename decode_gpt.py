@@ -61,8 +61,7 @@ def generate(model, cond, max_new_tokens, cfg_scale):
 
 if __name__ == "__main__":
     gpt = GPT_L().to(device)
-    # self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
-    state_dict = torch.load("runs_gpt/gpt-imagenet-1727429496/best.pth")
+    state_dict = torch.load("runs_gpt/gpt-imagenet-1727766066/best.pth")
     new_state_dict = {k[7:]: v for k, v in state_dict.items()}
     gpt.load_state_dict(new_state_dict)
     gpt.eval()
@@ -71,7 +70,7 @@ if __name__ == "__main__":
     vqgan_path = "runs_vqgan/vqgan-imagenet-1726089582/best.pth"
     vqgan.load_state_dict(torch.load(vqgan_path))
     bs = 16
-    cfg_scale = 2.0
+    cfg_scale = 1.0
 
     st = time.time()
     for i in trange(0,1000):

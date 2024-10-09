@@ -9,6 +9,7 @@ from utils import get_free_gpu, denormalize
 from dataclasses import dataclass, field
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.inception import InceptionScore
+from decode_gpt import generate
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
@@ -25,10 +26,10 @@ class TrainGPTConfig:
     epochs: int = 100
     lr: float = 6e-5
     warmup_steps: int = 5_000
-    max_steps: int = 200_000
+    max_steps: int = 250_000
     betas: tuple = (0.9, 0.95)
     log_interval: int = 10
-    eval_interval: int = 2000
+    eval_interval: int = 5_000
     class_cond: bool = False
     multi_gpu: bool = False
 
@@ -49,12 +50,16 @@ class TrainGPT:
         # self.gpt = GPTLanguageModel(self.config.gpt_config).to(self.device)
         self.gpt = GPT_L().to(self.device)
         # self.gpt.setup_caches(max_batch_size=16, max_seq_length=257, dtype=self.gpt.tok_embeddings.weight.dtype)
+        weight_path = "runs_gpt/gpt-imagenet-1728048051/best.pth"
         if self.config.multi_gpu:
             self.gpt = DDP(self.gpt, device_ids=[self.local_rank])
-            self.gpt.load_state_dict(torch.load("runs_gpt/gpt-imagenet-1727429496/best.pth"))
+            self.gpt.load_state_dict(torch.load(weight_path, weights_only=True))
             self.gpt_raw = self.gpt.module
-        else:
-            self.gpt_raw = self.gpt
+        # else:
+            # self.gpt_raw = self.gpt
+            # state_dict = torch.load(weight_path, weights_only=True)
+            # new_state_dict = {k[7:]: v for k, v in state_dict.items()}
+            # self.gpt_raw.load_state_dict(new_state_dict)
 
         # 2. optimizers
         self.optim = self.configure_optimizers()
@@ -171,73 +176,38 @@ class TrainGPT:
                                    "step_time": time.time()-st,
                                    "tokens_per_second": self.config.tokens_per_batch() / (time.time()-st)})
 
-                if self.steps % self.config.eval_interval == 0 and self.steps >= self.config.warmup_steps:
+                # if self.steps % self.config.eval_interval == 0 and self.steps >= self.config.warmup_steps:
+                if self.steps % self.config.eval_interval == 0:
                     self.evaluate()
-                    images = self.compute_metrics()
+                    class_idx = np.random.randint(0, 1000)
+                    images_no_cfg = self.generate_images(cfg_scale=1.0, class_idx=class_idx)
+                    images_cfg = self.generate_images(cfg_scale=2.0, class_idx=class_idx)
+                    print("generated images")
                     if self.master_process:
-                        self.generate_samples(self.run_folder / f"{self.steps}.jpg", images[:16,...])
-                        wandb.log({"Generated samples": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
-                        self.generate_completions(self.run_folder / f"{self.steps}_comp.jpg")
-                        wandb.log({"Completions": [wandb.Image(str(self.run_folder / f"{self.steps}_comp.jpg"))]})
+                        self.generate_samples(self.run_folder / f"{self.steps}.jpg", images_no_cfg[:16,...])
+                        wandb.log({"Generated samples (no cfg)": [wandb.Image(str(self.run_folder / f"{self.steps}.jpg"))]})
+                        self.generate_samples(self.run_folder / f"{self.steps}_cfg.jpg", images_cfg[:16,...])
+                        wandb.log({"Generated samples (cfg)": [wandb.Image(str(self.run_folder / f"{self.steps}_cfg.jpg"))]})
                 self.steps += 1
 
     @torch.inference_mode()
-    def compute_metrics(self):
-        # inference_gpt = GPT_B().to(self.device)
-        # inference_gpt.load_state_dict(self.gpt_raw.state_dict())
-        # inference_gpt.eval()
-        # with torch.device(self.device):
-            # inference_gpt.setup_caches(max_batch_size=16, max_seq_length=256, dtype=inference_gpt.tok_embeddings.weight.dtype)
-
-        inference_gpt = self.gpt_raw
-        incep_score = InceptionScore(normalize=False).to(self.device)
-        context = torch.zeros((16,1), dtype=torch.long, device=self.device)
-        if self.config.class_cond: context += 7 # set class to always be cock
-        res = inference_gpt.generate(context, 256)[:,1:]
+    def generate_images(self, cfg_scale=1.0, class_idx=7):
+        gpt_infer = GPT_L().to(self.device).eval()
+        gpt_infer.load_state_dict(self.gpt_raw.state_dict())
+        context = torch.zeros((16,), dtype=torch.long, device=self.device)
+        if self.config.class_cond: context += class_idx
+        res = generate(gpt_infer, context, 256, cfg_scale)
         res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
         res[res < 0] = 0
         images = (denormalize(self.vqgan.decode(res)) * 255).to(dtype=torch.uint8)
-        incep_score.update(images)
-        incep_score_val = incep_score.compute()[0].item()
-        print(f"Inception score: {incep_score_val}")
-        if self.master_process: wandb.log({"val/inception_score": float(incep_score_val)})
-        return images # return images to not have to generate them again for visualization
+        return images
 
     @torch.inference_mode()
-    def generate_samples(self, path, images=None):
-        if images is None:
-            context = torch.ones((16,1), dtype=torch.long, device=self.device)*self.config.vqgan_config.K
-            self.gpt_raw.setup_caches(max_batch_size=16, max_seq_length=258, dtype=self.gpt_raw.tok_embeddings.weight.dtype) res = self.gpt_raw.generate(context, 256)[:,1:] - 1000 res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1 res[res < 0] = 0
-            images = denormalize(self.vqgan.decode(res)).to(dtype=torch.uint8) * 255
+    def generate_samples(self, path, images):
         grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy()
         grid_final = PIL.Image.fromarray(grid)
         grid_final.save(path)
     
-    @torch.inference_mode()
-    def generate_completions(self, path):
-        idxs = torch.randint(0, len(self.test_dataset), (4,))
-        images_gt = torch.stack([self.test_dataset[i][0] for i in idxs]).to(self.device)
-        cls_gt = torch.stack([torch.tensor(self.test_dataset[i][1]) for i in idxs]).to(self.device)
-
-        with torch.inference_mode():
-            images_rec, quantized, _ = self.vqgan(images_gt.to(self.device))
-        quantized = quantized.view(images_gt.shape[0], -1)[:,:128]
-        cond_tokens = cls_gt.view((-1,1))
-        image_tokens = torch.cat([cond_tokens, quantized], dim=1)
-        res = self.gpt_raw.generate(image_tokens, 128)[:,1:]
-        res[res >= self.config.vqgan_config.K] = self.config.vqgan_config.K-1
-        res[res < 0] = 0
-        images_comp = denormalize(self.vqgan.decode(res))
-        images_gt = denormalize(images_gt)
-        images_rec = denormalize(images_rec)
-
-        grid_gt = torchvision.utils.make_grid(images_gt, nrow=4)
-        grid_rec = torchvision.utils.make_grid(images_rec, nrow=4)
-        grid_comp = torchvision.utils.make_grid(images_comp, nrow=4)
-        grid = torch.cat([grid_gt, grid_rec, grid_comp], dim=1).permute(1, 2, 0).cpu().detach().numpy() * 255
-        grid = PIL.Image.fromarray(grid.astype("uint8"))
-        grid.save(path)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")

@@ -1,8 +1,8 @@
 #!/bin/sh
-#SBATCH --time 2-23:59:59
+#SBATCH --time 3:59:59
 #SBATCH -n 16
-#SBATCH --partition=amdgpulong
-#SBATCH --gres=gpu:4
+#SBATCH --partition=amdgpufast
+#SBATCH --gres=gpu:1
 #BATCH --exclusive
 /bin/hostname
 nvidia-smi
@@ -21,5 +21,6 @@ python -m wandb online
 #python train_vqgan.py --dataset flower
 #python train_gpt.py --dataset bird
 #python train_maskgit.py --dataset bird
-torchrun --standalone --nproc_per_node=4 train_gpt.py --dataset imagenet --multi_gpu
+#torchrun --standalone --nproc_per_node=4 train_gpt.py --dataset imagenet --multi_gpu
+python evaluate.py
 #torchrun --standalone --nproc_per_node=4 train_maskgit.py --dataset imagenet --multi_gpu

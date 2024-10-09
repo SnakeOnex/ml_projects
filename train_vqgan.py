@@ -1,7 +1,7 @@
 import torch, torch.nn as nn, torchvision, argparse, time, time, tqdm, PIL, wandb, torch.nn.functional as F
 from pathlib import Path
 from torch.utils.data import DataLoader
-from vqgan import VQGAN, VQGANConfig, Discriminator
+from vqgan import VQGAN, VQGAN_LFG, VQGANConfig, Discriminator
 from model_configs import dataset_loaders
 import matplotlib.pyplot as plt
 from utils import get_free_gpu, denormalize
@@ -57,7 +57,8 @@ class TrainVQGAN:
         self.config = config
 
         # 1. init models
-        self.vqgan = VQGAN(self.config.vqgan_config).to(device)
+        # self.vqgan = VQGAN(self.config.vqgan_config).to(device)
+        self.vqgan = VQGAN_LFG(self.config.vqgan_config).to(device)
         self.discriminator = Discriminator(self.config.vqgan_config).to(device)
 
         # 2. losses & optimizers
@@ -175,7 +176,7 @@ class TrainVQGAN:
                                "lambda": lamb.item(),
                                "disc_factor": disc_factor})
 
-                if self.steps % self.config.eval_interval == 0: 
+                if self.steps % self.config.eval_interval == 0:
                     self.evaluate()
                     plot_results(self.vqgan, self.test_dataset, path=self.run_folder / f"test_{self.config.dataset}_{self.steps}.jpg", idxs=None)
                     wandb.log({"test_reconstruction": [wandb.Image(str(self.run_folder / f"test_{self.config.dataset}_{self.steps}.jpg"))]})
