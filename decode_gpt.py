@@ -61,7 +61,7 @@ def generate(model, cond, max_new_tokens, cfg_scale):
 
 if __name__ == "__main__":
     gpt = GPT_L().to(device)
-    state_dict = torch.load("runs_gpt/gpt-imagenet-1727766066/best.pth")
+    state_dict = torch.load("runs_gpt/gpt-imagenet-1728048051/best.pth", weights_only=True)
     new_state_dict = {k[7:]: v for k, v in state_dict.items()}
     gpt.load_state_dict(new_state_dict)
     gpt.eval()
@@ -70,14 +70,14 @@ if __name__ == "__main__":
     vqgan_path = "runs_vqgan/vqgan-imagenet-1726089582/best.pth"
     vqgan.load_state_dict(torch.load(vqgan_path))
     bs = 16
-    cfg_scale = 1.0
+    cfg_scale = 2.0
 
     st = time.time()
     for i in trange(0,1000):
         cond = torch.zeros((bs,), dtype=torch.long, device=device)
         cond += i
         output_tokens = generate(gpt, cond, 256, cfg_scale)
-        filename = f"samples/{i}{'_cfg' if cfg_scale>1.0 else ''}.png"
+        filename = f"samples/{i}{'_cfg' if cfg_scale>1.0 else ''}.jpg"
 
         images = (denormalize(vqgan.decode(output_tokens)) * 255).to(dtype=torch.uint8)
         grid = torchvision.utils.make_grid(images, nrow=4).permute(1, 2, 0).cpu().detach().numpy()
